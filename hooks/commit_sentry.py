@@ -14,10 +14,12 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
-DOCS_ONLY = ["*.md", "*.txt", "*.rst", "TODO/*", "CHANGELOG*", "changelog.md"]
+DOCS_ONLY = ["*.md", "*.txt", "*.rst", "CHANGELOG*", "changelog.md"]
 ALWAYS_REVIEW = [
     "SKILL.md", "CLAUDE.md", "AGENTS.md", "*/agents/*", "agents/*", "*/rules/*", "rules/*",
     ".claude/*", "*/hooks/*", "hooks/*", ".claude-plugin/*", "*/.claude-plugin/*",
+    "*/.claude/*", "commands/*", "*/commands/*",
+    "requirements*.txt", "constraints*.txt", "CMakeLists.txt", ".mcp.json", "*/.mcp.json",
 ]
 DENY_READ = [".env*", "*.pem", "*.key", "id_rsa*", "id_ed25519*", "Sensitive-data/*", "*/Sensitive-data/*"]
 RULES_FILE = os.path.join(".claude", "commit-sentry.md")
@@ -51,9 +53,44 @@ def parse_commit_output(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SKIP_TOKENS = {"(", ")", "{", "}", "!"}
+_GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
+
+
+def _newlines_to_semicolons(command: str) -> str:
+    """Replace unquoted newlines with ';' (newlines inside quotes are kept)."""
+    out: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(command):
+                out.append(ch)
+                i += 1
+                ch = command[i]
+            elif ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "\\" and i + 1 < len(command):
+            out.append(ch)
+            i += 1
+            ch = command[i]
+        elif ch == "\n":
+            ch = " ; "
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _segments(command: str) -> list[list[str]]:
-    """Split a shell command into simple commands at &&, ||, ;, | and &."""
-    lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    """Split a shell command into simple commands at &&, ||, ;, |, & and unquoted newlines.
+
+    Leading `(`, `{`, `}`, `!` and `NAME=value` tokens are dropped from each segment.
+    """
+    lex = shlex.shlex(_newlines_to_semicolons(command), posix=True, punctuation_chars=True)
     lex.whitespace_split = True
     try:
         tokens = list(lex)
@@ -61,11 +98,18 @@ def _segments(command: str) -> list[list[str]]:
         return []
     segs: list[list[str]] = [[]]
     for tok in tokens:
-        if tok in _SEPARATORS:
-            segs.append([])
-        else:
-            segs[-1].append(tok)
-    return [s for s in segs if s]
+        if tok and set(tok) <= set("();&|"):
+            if set(tok) & set(";&|"):
+                segs.append([])
+            continue
+        segs[-1].append(tok)
+    cleaned = []
+    for seg in segs:
+        while seg and (seg[0] in _SKIP_TOKENS or _ENV_ASSIGN.match(seg[0])):
+            seg = seg[1:]
+        if seg:
+            cleaned.append(seg)
+    return cleaned
 
 
 def _git_subcommand_index(seg: list[str]) -> int | None:
@@ -74,7 +118,7 @@ def _git_subcommand_index(seg: list[str]) -> int | None:
         return None
     i = 1
     while i < len(seg) and seg[i].startswith("-"):
-        i += 2 if seg[i] in ("-C", "-c") else 1
+        i += 2 if seg[i] in _GIT_VALUE_OPTS else 1
     return i if i < len(seg) else None
 
 
@@ -151,14 +195,11 @@ def load_rules(repo: str) -> Rules:
 
 
 def matches(path: str, patterns: list[str]) -> bool:
-    """fnmatch on the path; patterns without '/' are also tried on the file name."""
+    """fnmatch on the path; patterns without '/' match the file name only."""
     base = path.rsplit("/", 1)[-1]
-    for pat in patterns:
-        if fnmatch.fnmatchcase(path, pat):
-            return True
-        if "/" not in pat and fnmatch.fnmatchcase(base, pat):
-            return True
-    return False
+    return any(
+        fnmatch.fnmatchcase(path if "/" in pat else base, pat) for pat in patterns
+    )
 
 
 def skip_reason(commit: Commit, rules: Rules) -> str | None:

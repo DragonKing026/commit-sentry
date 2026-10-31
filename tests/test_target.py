@@ -59,6 +59,26 @@ class TargetTests(unittest.TestCase):
         os.mkdir(plain)
         self.assertEqual(cs.target_repo("cd plain && git commit -m x", self.tmp), plain)
 
+    def test_target_repo_newlines_subshell_env(self):
+        sub = make_repo(os.path.join(self.tmp, "sub"))
+        main = make_repo(os.path.join(self.tmp, "main"))
+        self.assertEqual(cs.target_repo("cd ../sub\ngit commit -m x", main), sub)
+        self.assertEqual(cs.target_repo("git add a\ngit -C ../sub commit -m x", main), sub)
+        self.assertEqual(cs.target_repo("(cd ../sub && git commit -m x)", main), sub)
+        self.assertEqual(cs.target_repo("{ cd ../sub; git commit -m x; }", main), sub)
+        self.assertEqual(cs.target_repo("FOO=1 git -C ../sub commit -m x", main), sub)
+        self.assertEqual(cs.target_repo("FOO=1 git commit -m x", main), main)
+        # newline inside a quoted message / heredoc body is not a separator
+        msg = "git commit -m \"$(cat <<'EOF'\ncd ../sub\nEOF\n)\""
+        self.assertEqual(cs.target_repo(msg, main), main)
+
+    def test_target_repo_git_global_options(self):
+        sub = make_repo(os.path.join(self.tmp, "sub"))
+        main = make_repo(os.path.join(self.tmp, "main"))
+        self.assertEqual(cs.target_repo("git --git-dir=x commit -m x", main), main)
+        self.assertEqual(cs.target_repo("git --work-tree ../sub commit -m x", main), main)
+        self.assertEqual(cs.target_repo("git -c a=b -C ../sub commit -m x", main), sub)
+
     def test_root_commit_files(self):
         repo = make_repo(os.path.join(self.tmp, "r"))
         sha = commit_file(repo, "a.py")
@@ -91,6 +111,13 @@ class TargetTests(unittest.TestCase):
         self.assertIsNone(reason(["a.py"]))
         self.assertIsNone(reason([".claude/settings.json"]))
         self.assertEqual(reason([]), "empty")
+        self.assertIsNone(reason(["requirements.txt"]))
+        self.assertIsNone(reason(["TODO/x/run.sh"]))
+        self.assertEqual(reason(["TODO/x/todo.md"]), "docs-only")
+        self.assertIsNone(reason(["CHANGELOG/x.py"]))
+        self.assertIsNone(reason(["pkg/.claude/commands/x.md"]))
+        self.assertIsNone(reason([".mcp.json"]))
+        self.assertEqual(reason(["docs/guide.md"]), "docs-only")
 
     def test_rules_header_appends(self):
         Path(self.tmp, ".claude").mkdir()
@@ -116,6 +143,8 @@ class TargetTests(unittest.TestCase):
     def test_matches(self):
         self.assertTrue(cs.matches("a/b/SKILL.md", ["SKILL.md"]))
         self.assertTrue(cs.matches("TODO/x/y.md", ["TODO/*"]))
+        self.assertFalse(cs.matches("CHANGELOG/x.py", ["CHANGELOG*"]))
+        self.assertFalse(cs.matches("a/b.txt/c.py", ["*.txt"]))
         self.assertFalse(cs.matches("src/a.py", ["*.md"]))
 
 

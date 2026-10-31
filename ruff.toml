@@ -1,0 +1,9 @@
+# CI runs `ruff check hooks tests` with the version pinned in .github/workflows/test.yml.
+target-version = "py311"
+
+[lint.per-file-ignores]
+# The hook runs inside someone else's Claude Code session and must never crash it:
+# every top-level failure is caught, logged and reported (fail-open by design), and
+# the secondary logging attempts are best-effort, so a blind `except Exception` and
+# `try/except/pass` are intentional in this file.
+"hooks/commit_sentry.py" = ["BLE001", "S110"]

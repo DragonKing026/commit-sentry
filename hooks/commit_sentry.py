@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 DOCS_ONLY = ["*.md", "*.txt", "*.rst", "CHANGELOG*", "changelog.md"]
@@ -284,7 +284,7 @@ def first_failure(session_id: str) -> bool:
 def append_log(record: dict) -> None:
     """Append one JSON line to reviews.jsonl, adding `ts` unless provided."""
     rec = dict(record)
-    rec.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    rec.setdefault("ts", datetime.now(UTC).isoformat(timespec="seconds"))
     line = json.dumps(rec, ensure_ascii=False) + "\n"
     with open(log_path(), "a", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -735,7 +735,7 @@ def _hook(stdin, stderr) -> int:
         except ValueError as e:
             raise ValueError(f"invalid hook input: {e}") from e
         if not isinstance(data, dict):
-            raise ValueError("invalid hook input: not an object")
+            raise ValueError("invalid hook input: not an object")  # noqa: TRY004 (logged as ValueError, same as bad JSON above)
         ctx["session_id"] = str(data.get("session_id") or "unknown")
         short = ctx["short"] = _commit_sha(data)
         if not short:

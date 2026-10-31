@@ -1,5 +1,12 @@
 # commit-sentry
 
+[![test](https://github.com/DragonKing026/commit-sentry/actions/workflows/test.yml/badge.svg)](https://github.com/DragonKing026/commit-sentry/actions/workflows/test.yml)
+[![CodeQL](https://github.com/DragonKing026/commit-sentry/actions/workflows/codeql.yml/badge.svg)](https://github.com/DragonKing026/commit-sentry/actions/workflows/codeql.yml)
+[![security](https://github.com/DragonKing026/commit-sentry/actions/workflows/security.yml/badge.svg)](https://github.com/DragonKing026/commit-sentry/actions/workflows/security.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/DragonKing026/commit-sentry/badge)](https://scorecard.dev/viewer/?uri=github.com/DragonKing026/commit-sentry)
+
+Security checks in CI: unit tests (Python 3.11-3.13), ruff, CodeQL, gitleaks secret scan of the full history, zizmor workflow audit, OpenSSF Scorecard; all GitHub Actions are pinned to commit SHAs and kept current by Dependabot.
+
 A Claude Code plugin that reviews every commit your agent makes for security problems, in the background,
 and wakes the session only when a finding survives a second, skeptical pass.
 

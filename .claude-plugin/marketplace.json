@@ -1,0 +1,16 @@
+{
+  "name": "commit-sentry",
+  "owner": {
+    "name": "DragonKing026"
+  },
+  "metadata": {
+    "description": "commit-sentry — background security review of agent commits."
+  },
+  "plugins": [
+    {
+      "name": "commit-sentry",
+      "source": "./",
+      "description": "Two-stage background security review after each agent git commit; wakes the session only on confirmed findings."
+    }
+  ]
+}

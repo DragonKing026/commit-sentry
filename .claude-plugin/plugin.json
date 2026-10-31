@@ -1,0 +1,17 @@
+{
+  "name": "commit-sentry",
+  "version": "0.1.0",
+  "description": "Background two-stage security review of every commit the agent makes. Wakes the session only on confirmed findings.",
+  "author": {
+    "name": "DragonKing026"
+  },
+  "homepage": "https://github.com/DragonKing026/commit-sentry",
+  "repository": "https://github.com/DragonKing026/commit-sentry",
+  "license": "Apache-2.0",
+  "keywords": [
+    "security",
+    "review",
+    "git",
+    "hook"
+  ]
+}

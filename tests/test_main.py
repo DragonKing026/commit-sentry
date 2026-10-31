@@ -145,13 +145,60 @@ class HookTests(MainTestBase):
         self.assertEqual(self.log()[-1]["outcome"], "failed")
         self.assertEqual(self.run_hook("")[0], 0)  # once per session ("unknown")
 
-    def test_hook_state_io_failure_never_raises(self):
+    def break_state(self):
         blocker = self.tmp / "file"
         blocker.write_text("x")
-        os.environ["COMMIT_SENTRY_STATE_DIR"] = str(blocker / "sub")
-        self.reply(ok_reply(fenced([])))
-        code, _ = self.run_hook(self.hook_input())
-        self.assertIn(code, (0, 2))
+        os.environ["COMMIT_SENTRY_STATE_DIR"] = str(blocker)
+
+    def test_broken_state_still_reports_findings(self):
+        self.break_state()
+        self.reply(ok_reply(fenced([CAND])), ok_reply(fenced(CONFIRM)))
+        code, err = self.run_hook(self.hook_input())
+        self.assertEqual(code, 2)
+        self.assertIn("user input reaches os.system", err)
+
+    def test_broken_state_failure_notice(self):
+        self.break_state()
+        self.reply(json.dumps({"is_error": True, "result": "x"}))
+        code, err = self.run_hook(self.hook_input())
+        self.assertEqual(code, 2)
+        self.assertIn("failed", err)
+        self.assertTrue(err.rstrip().endswith("log: ?"))
+
+    def test_log_error_does_not_lose_findings(self):
+        self.reply(ok_reply(fenced([CAND])), ok_reply(fenced(CONFIRM)))
+        orig = cs.append_log
+
+        def boom(rec):
+            raise OSError("disk full")
+        cs.append_log = boom
+        self.addCleanup(setattr, cs, "append_log", orig)
+        code, err = self.run_hook(self.hook_input())
+        self.assertEqual(code, 2)
+        self.assertIn("user input reaches os.system", err)
+        self.assertNotIn("failed (", err)
+
+    def test_notice_reason_is_one_line_and_capped(self):
+        out = io.StringIO()
+        cs._failure_notice("s", "abcdef123", "line one\nline two " + "x" * 500, out)
+        text = out.getvalue()
+        self.assertEqual(text.count("\n"), 1)
+        self.assertLess(len(text), 400)
+
+    def test_repo_switch_accepts_bool_spellings(self):
+        for value in ("no", "off", "0"):
+            git(self.repo, "config", "commit-sentry.enabled", value)
+            self.reply(ok_reply(fenced([CAND])))
+            self.assertEqual(self.run_hook(self.hook_input()), (0, ""))
+        self.assertFalse(self.record.exists())
+
+    def test_stage_timeout_clamped(self):
+        os.environ["COMMIT_SENTRY_STAGE_TIMEOUT"] = "5000"
+        self.assertEqual(cs.stage_timeout(), 420)
+        os.environ["COMMIT_SENTRY_STAGE_TIMEOUT"] = "60"
+        self.assertEqual(cs.stage_timeout(), 60)
+        os.environ.pop("COMMIT_SENTRY_STAGE_TIMEOUT")
+        self.assertEqual(cs.stage_timeout(), 300)
 
     def test_hook_docs_only_skipped(self):
         c = self.commit({"README.md": "hi\n"})

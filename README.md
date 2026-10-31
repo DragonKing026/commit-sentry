@@ -40,7 +40,7 @@ Environment variables:
 | `COMMIT_SENTRY_ACTIVE` | unset | Set to `1` for child processes to prevent recursion; do not set it yourself. |
 | `COMMIT_SENTRY_MODEL` | `opus` | Model used in both stages. |
 | `COMMIT_SENTRY_MAX_PER_HOUR` | `20` | Maximum reviews per 3600 s, across all repositories. |
-| `COMMIT_SENTRY_STAGE_TIMEOUT` | `300` | Timeout of each stage in seconds. |
+| `COMMIT_SENTRY_STAGE_TIMEOUT` | `300` | Timeout of each stage in seconds (capped at 420, because the hook itself times out after 900 s). |
 | `COMMIT_SENTRY_CLAUDE` | `claude` | Path of the CLI to run (useful for tests). |
 | `COMMIT_SENTRY_STATE_DIR` | plugin data dir / `XDG_STATE_HOME` | Overrides where the log and rate-limit state live. |
 
@@ -57,7 +57,7 @@ python3 hooks/commit_sentry.py --review <sha> [--repo DIR] [--force]
 
 Runs the same two stages on any commit and prints the result to stdout (no hourly limit, no session state).
 Exit code 0: no confirmed findings (or skipped), 1: confirmed findings, 2: the review failed. Merge commits and
-docs-only commits are skipped unless you pass `--force` (docs-only only). The run is written to the log with
+docs-only and empty commits are skipped unless you pass `--force`; `--force` does not override the merge-commit skip. The run is written to the log with
 `session_id` `manual`.
 
 ## Project rules file

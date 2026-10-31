@@ -265,8 +265,9 @@ def take_rate_slot(now: float, limit: int, window: int) -> bool:
 def first_failure(session_id: str) -> bool:
     """True only the first time it is called for this session (race-safe marker file)."""
     name = "failed-" + hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    marker = state_dir() / name  # outside the try: a broken state dir must not look like "already failed"
     try:
-        fd = os.open(state_dir() / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         return False
     os.close(fd)
@@ -319,6 +320,13 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name) or default)
     except ValueError:
         return default
+
+
+MAX_STAGE_TIMEOUT = 420  # two stages plus overhead must fit the hook timeout (900 s)
+
+
+def stage_timeout() -> int:
+    return max(1, min(_env_int("COMMIT_SENTRY_STAGE_TIMEOUT", 300), MAX_STAGE_TIMEOUT))
 
 
 def deny_rules(patterns: list[str]) -> list[str]:
@@ -409,7 +417,7 @@ def run_claude(prompt: str, repo: str, rules: Rules) -> StageResult:
         "--output-format", "json", "--no-session-persistence",
     ]
     env = dict(os.environ, COMMIT_SENTRY_ACTIVE="1")
-    timeout = _env_int("COMMIT_SENTRY_STAGE_TIMEOUT", 300)
+    timeout = stage_timeout()
     start = time.monotonic()
 
     def fail(error: str, data: dict | None = None) -> StageResult:
@@ -655,16 +663,36 @@ def _log(session_id: str, repo: str, commit: Commit | None, outcome: str, reason
 def _failure_notice(session_id: str, sha: str | None, reason: str, stderr) -> int:
     """Exit 2 with a one-line notice the first time a session sees a failure, else 0."""
     try:
-        if not first_failure(session_id):
-            return 0
-        try:
-            where = str(log_path())
-        except Exception:
-            where = "?"
+        first = first_failure(session_id)
+    except Exception:
+        first = True  # broken state degrades to "no state": report rather than stay silent
+    if not first:
+        return 0
+    try:
+        where = str(log_path())
+    except Exception:
+        where = "?"
+    reason = " ".join(str(reason).split())[:200]
+    try:
         stderr.write(f"commit-sentry: review of {(sha or '?')[:7]} failed ({reason}); log: {where}\n")
-        return 2
     except Exception:
         return 0
+    return 2
+
+
+def _safe_log(*args, **kwargs) -> None:
+    """Logging outside the internal-error path must never change the outcome."""
+    try:
+        _log(*args, **kwargs)
+    except Exception:
+        pass
+
+
+def _rate_slot() -> bool:
+    try:
+        return take_rate_slot(time.time(), _env_int("COMMIT_SENTRY_MAX_PER_HOUR", 20), 3600)
+    except Exception:
+        return True  # broken state degrades to "no state": the slot is available
 
 
 def _commit_sha(data: dict) -> str | None:
@@ -698,7 +726,7 @@ def _hook(stdin, stderr) -> int:
         tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
         repo = ctx["repo"] = target_repo(str(tool_input.get("command") or ""),
                                          str(data.get("cwd") or os.getcwd()))
-        if _git(repo, "config", "--get", "commit-sentry.enabled").stdout.strip().lower() == "false":
+        if _git(repo, "config", "--type=bool", "--get", "commit-sentry.enabled").stdout.strip() == "false":
             return 0
         commit = ctx["commit"] = resolve_commit(repo, short)
         if commit is None:
@@ -707,21 +735,21 @@ def _hook(stdin, stderr) -> int:
         rules = load_rules(repo)
         reason = skip_reason(commit, rules)
         if reason:
-            _log(sid, repo, commit, "skipped", reason)
+            _safe_log(sid, repo, commit, "skipped", reason)
             return 0
-        if not take_rate_slot(time.time(), _env_int("COMMIT_SENTRY_MAX_PER_HOUR", 20), 3600):
-            _log(sid, repo, commit, "skipped", "rate")
+        if not _rate_slot():
+            _safe_log(sid, repo, commit, "skipped", "rate")
             return _failure_notice(sid, commit.sha, "rate limit reached", stderr)
         res = run_review(repo, commit, rules)
-        _log(sid, repo, commit, res["outcome"], res["reason"], stages=res["stages"],
-             candidates=res["candidates"], confirmed=res["confirmed"],
-             error=res["reason"] if res["outcome"] == "failed" else None)
+        text = format_findings(res["confirmed"]) if res["outcome"] == "findings" else ""
+        if text:
+            stderr.write(text)  # before logging: a logging error must not lose the findings
+        _safe_log(sid, repo, commit, res["outcome"], res["reason"], stages=res["stages"],
+                  candidates=res["candidates"], confirmed=res["confirmed"],
+                  error=res["reason"] if res["outcome"] == "failed" else None)
         if res["outcome"] == "failed":
             return _failure_notice(sid, commit.sha, res["reason"], stderr)
-        if res["outcome"] == "findings":
-            stderr.write(format_findings(res["confirmed"]))
-            return 2
-        return 0
+        return 2 if text else 0
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
         try:
@@ -752,21 +780,23 @@ def _manual(argv: list[str], stdout) -> int:
         rules = load_rules(repo)
         reason = skip_reason(commit, rules)
         if reason and not (args.force and reason in ("docs-only", "empty")):
-            _log("manual", repo, commit, "skipped", reason)
+            _safe_log("manual", repo, commit, "skipped", reason)
             stdout.write(f"Skipped: {reason}\n")
             return 0
         res = run_review(repo, commit, rules)
-        _log("manual", repo, commit, res["outcome"], res["reason"], stages=res["stages"],
-             candidates=res["candidates"], confirmed=res["confirmed"],
-             error=res["reason"] if res["outcome"] == "failed" else None)
         if res["outcome"] == "failed":
             stdout.write(f"Review failed: {res['reason']}\n")
-            return 2
-        if res["confirmed"]:
+            code = 2
+        elif res["confirmed"]:
             stdout.write(format_findings(res["confirmed"]))
-            return 1
-        stdout.write("No confirmed findings.\n")
-        return 0
+            code = 1
+        else:
+            stdout.write("No confirmed findings.\n")
+            code = 0
+        _safe_log("manual", repo, commit, res["outcome"], res["reason"], stages=res["stages"],
+                  candidates=res["candidates"], confirmed=res["confirmed"],
+                  error=res["reason"] if res["outcome"] == "failed" else None)
+        return code
     except Exception as e:
         stdout.write(f"Review failed: {type(e).__name__}: {e}\n")
         try:

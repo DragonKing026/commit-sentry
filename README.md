@@ -18,8 +18,8 @@ keeps working while the review runs.
   (`asyncRewake`), so the session is woken only when the script exits with findings.
 - The script reads the commit that was just made (in the repository where the commit happened, also for
   `git -C` and worktrees), builds a size-limited diff and runs
-  `claude -p --safe-mode --model opus --tools Read,Grep,Glob --output-format json --no-session-persistence`
-  twice: find, then verify.
+  `claude -p --safe-mode --restricted --model opus --tools Read,Grep,Glob --output-format json --no-session-persistence`
+  (file tools allowed only inside the repository) twice: find, then verify.
 - Failed commits, merge commits and runs started by the reviewer itself are skipped.
 - Any internal error is logged and never breaks your session.
 
@@ -63,6 +63,14 @@ The diff of the commit (size-limited; binary files and files matched by your `de
 the commit message, your `.claude/commit-sentry.md` and whatever files the reviewer reads with `Read`, `Grep` and
 `Glob` are sent to the model through the `claude` CLI, under your own account and its data terms. Do not enable the
 plugin in repositories whose content must not be sent to Anthropic.
+
+What the reviewer can read: the CLI runs with `--restricted` and
+`--allowedTools "Read(./**)" "Grep(./**)" "Glob(./**)"`, which confines its file tools to the repository. Absolute paths, `../` paths and committed symbolic links that point
+outside the repository are refused, and user, project and local settings files are ignored, so a committed
+`.claude/settings.json` cannot widen the scope. Inside the repository, files matching `deny-read` and the `.git/`
+directory are blocked by deny rules. Residual risk: any other file inside the repository (including untracked files in
+the working tree that do not match `deny-read`) can be read and sent to the model, so add patterns for local secrets
+to `deny-read`. Admin-managed (policy) settings still apply and could widen the scope.
 
 ## Cost
 

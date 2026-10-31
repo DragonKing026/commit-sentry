@@ -1,0 +1,12 @@
+# libFuzzer dictionary: fenced JSON in model output.
+fence_open="```json\x0A"
+fence_open_crlf="```json \x0D\x0A"
+fence_close="```"
+findings="{\"findings\": ["
+item="{\"severity\": \"HIGH\", \"file\": \"a.py\"}"
+lb="["
+rb="]"
+lc="{"
+rc="}"
+comma=","
+null="null"

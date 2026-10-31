@@ -1,0 +1,8 @@
+# libFuzzer dictionary: git commit output lines.
+open="["
+close="]"
+main="[main "
+root="(root-commit) "
+detached="[detached HEAD "
+sha7="1a2b3c4"
+nl="\x0A"

@@ -1,0 +1,43 @@
+---
+# ClusterFuzzLite (https://google.github.io/clusterfuzzlite/running-clusterfuzzlite/github-actions/):
+# code-change fuzzing on pull requests and pushes to main, batch fuzzing weekly. Fuzz targets: fuzz/fuzz_*.py.
+name: cflite
+
+"on":
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "11 3 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # run_fuzzers downloads earlier builds and corpora from workflow artifacts
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      # v1 (the action clones the repository itself; there is no actions/checkout step)
+      - name: Build fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1
+        with:
+          language: python
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: address
+      # v1
+      - name: Run fuzzers
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 300
+          mode: ${{ github.event_name == 'schedule' && 'batch' || 'code-change' }}
+          sanitizer: address

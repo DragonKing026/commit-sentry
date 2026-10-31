@@ -5,7 +5,7 @@
 [![security](https://github.com/DragonKing026/commit-sentry/actions/workflows/security.yml/badge.svg)](https://github.com/DragonKing026/commit-sentry/actions/workflows/security.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/DragonKing026/commit-sentry/badge)](https://scorecard.dev/viewer/?uri=github.com/DragonKing026/commit-sentry)
 
-Security checks in CI: unit tests (Python 3.11-3.13), ruff, CodeQL, gitleaks secret scan of the full history, zizmor workflow audit, OpenSSF Scorecard; all GitHub Actions are pinned to commit SHAs and kept current by Dependabot.
+Security checks in CI: unit tests (Python 3.11-3.13), ruff, CodeQL, gitleaks secret scan of the full history, zizmor workflow audit, ClusterFuzzLite (Atheris fuzzing of the commit-output, command and model-output parsers), OpenSSF Scorecard; all GitHub Actions are pinned to commit SHAs and CI tools by hash, all kept current by Dependabot; releases carry SLSA provenance.
 
 A Claude Code plugin that reviews every commit your agent makes for security problems, in the background,
 and wakes the session only when a finding survives a second, skeptical pass.
@@ -36,6 +36,22 @@ keeps working while the review runs.
 ```
 
 Requires Python 3.11+ (standard library only), `git`, and the `claude` CLI logged in with your account.
+
+## Releases
+
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) from a `v*` tag: the source
+archive `commit-sentry-<version>.tar.gz`, `SHA256SUMS` and SLSA level 3 provenance
+`commit-sentry-<version>.tar.gz.intoto.jsonl` from
+[slsa-github-generator](https://github.com/slsa-framework/slsa-github-generator). To verify a download with
+[slsa-verifier](https://github.com/slsa-framework/slsa-verifier):
+
+```sh
+slsa-verifier verify-artifact commit-sentry-0.1.0.tar.gz \
+  --provenance-path commit-sentry-0.1.0.tar.gz.intoto.jsonl \
+  --source-uri github.com/DragonKing026/commit-sentry \
+  --source-tag v0.1.0
+sha256sum -c SHA256SUMS
+```
 
 ## Configuration
 

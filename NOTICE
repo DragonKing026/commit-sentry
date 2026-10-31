@@ -10,10 +10,26 @@ with modifications:
    `security-guidance` plugin in https://github.com/anthropics/claude-plugins-official
    Licensed under the Apache License, Version 2.0.
    Copyright Anthropic, PBC.
+   - prompts/investigate.md is adapted from AGENTIC_INVESTIGATE_SYSTEM and
+     build_investigate_prompt() in plugins/security-guidance/hooks/review_api.py;
+   - prompts/refute.md is adapted from AGENTIC_REFUTE_SYSTEM and
+     build_refute_prompt() in the same file;
+   - format_findings() in hooks/commit_sentry.py is adapted from
+     format_findings() and filter_by_severity() in the same file.
+   Changes: the text was shortened and reworded, merged into single prompts
+   for `claude -p` (diff embedded in the prompt, read-only tools), given a
+   different JSON output format (a fenced block with file/line/severity/...
+   fields, and per-candidate verdicts with severity), extended with
+   project-context, untrusted-data and agent-configuration guidance, and the
+   severity scale was changed to HIGH/MEDIUM/LOW.
 
 2. The prompt approach (separate finding and false-positive filtering stages)
    is adapted from https://github.com/anthropics/claude-code-security-review
    Licensed under the MIT License. Copyright Anthropic, PBC.
+   The confidence thresholds, severity definitions, exclusions and precedents
+   in prompts/investigate.md and prompts/refute.md are adapted, shortened and
+   modified from the audit prompt in claudecode/prompts.py and the
+   false-positive filtering instructions in claudecode/claude_api_client.py.
 
 The MIT License notice for item 2:
 

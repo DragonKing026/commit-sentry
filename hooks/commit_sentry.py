@@ -13,8 +13,10 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -279,6 +281,276 @@ def append_log(record: dict) -> None:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.write(line)
         f.flush()
+
+
+# --- Reviewer ---------------------------------------------------------------
+
+PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+TOOLS = "Read,Grep,Glob"
+SEVERITIES = ("HIGH", "MEDIUM", "LOW")
+WAKE_SEVERITIES = {"HIGH", "MEDIUM"}
+TRUNCATED_MARK = "[diff truncated"
+_JSON_BLOCK = re.compile(r"```json[ \t]*\r?\n(.*?)```", re.DOTALL)
+_PLACEHOLDER = re.compile(r"\{(diff|truncated_note|project_rules|candidates)\}")
+
+
+@dataclass
+class StageResult:
+    ok: bool
+    text: str
+    usage: dict
+    cost_usd: float
+    duration_s: float
+    error: str | None
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+def deny_rules(patterns: list[str]) -> list[str]:
+    """Permission deny rules (`Read(...)`) for fnmatch deny-read patterns, anywhere in the repo.
+
+    fnmatch's `*` also crosses `/`, permission globs do not, so `dir/*` also gets `dir/**`.
+    """
+    rules: list[str] = []
+    for pat in patterns:
+        variants = [pat]
+        if pat.endswith("/*"):
+            variants.append(pat + "*")
+        for p in variants:
+            if "/" in p:
+                rules += [f"Read({p})", f"Read(**/{p})"]
+            else:
+                rules.append(f"Read(**/{p})")
+    return rules
+
+
+def _binary_files(repo: str, commit: Commit) -> set[str]:
+    """Paths that git reports as binary (`-` in --numstat) in this commit."""
+    args = ["show", "--format=", "--numstat", "--no-renames", "-z", "--no-color"]
+    if not commit.parents:
+        args.append("--root")
+    out = _git(repo, *args, commit.sha).stdout
+    binary = set()
+    for entry in out.split("\0"):
+        parts = entry.strip("\n").split("\t", 2)
+        if len(parts) == 3 and parts[0] == "-" and parts[1] == "-":
+            binary.add(parts[2])
+    return binary
+
+
+def commit_diff(repo: str, commit: Commit, rules: Rules, cap: int = 60000) -> tuple[str, bool]:
+    """Diff of the commit without deny-read and binary files, cut to `cap` characters.
+
+    Returns (diff, truncated). A truncated diff ends with a `[diff truncated ...]` marker.
+    """
+    binary = _binary_files(repo, commit)
+    keep = [f for f in commit.files if f not in binary and not matches(f, rules.deny_read)]
+    omitted = len(commit.files) - len(keep)
+    diff = ""
+    if keep:
+        args = ["show", "--format=", "--no-color", "--no-ext-diff", "--no-textconv", "-M"]
+        if not commit.parents:
+            args.append("--root")
+        diff = _git(repo, *args, commit.sha, "--", *(f":(literal){f}" for f in keep)).stdout
+    truncated = len(diff) > cap
+    if truncated:
+        total = len(diff)
+        cut = diff[:cap]
+        if "\n" in cut:
+            cut = cut[:cut.rindex("\n") + 1]
+        diff = f"{cut}\n{TRUNCATED_MARK}: showing the first {len(cut)} of {total} characters]\n"
+    if omitted:
+        diff += f"[{omitted} file(s) left out of this diff: binary or excluded by deny-read]\n"
+    return diff, truncated
+
+
+def _usage(data: dict) -> dict:
+    u = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    keys = {"input_tokens": "input_tokens", "output_tokens": "output_tokens",
+            "cache_read": "cache_read_input_tokens", "cache_creation": "cache_creation_input_tokens"}
+    return {k: u[src] for k, src in keys.items() if isinstance(u.get(src), int)}
+
+
+def _cost(data: dict) -> float:
+    try:
+        return float(data.get("total_cost_usd") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def run_claude(prompt: str, repo: str, rules: Rules) -> StageResult:
+    """One headless review stage: `claude -p` with read-only tools, prompt on stdin."""
+    cmd = [
+        os.environ.get("COMMIT_SENTRY_CLAUDE") or "claude", "-p", "--safe-mode",
+        "--model", os.environ.get("COMMIT_SENTRY_MODEL") or "opus",
+        "--tools", TOOLS, "--allowedTools", TOOLS,
+        "--settings", json.dumps({"permissions": {"deny": deny_rules(rules.deny_read)}}),
+        "--output-format", "json", "--no-session-persistence",
+    ]
+    env = dict(os.environ, COMMIT_SENTRY_ACTIVE="1")
+    timeout = _env_int("COMMIT_SENTRY_STAGE_TIMEOUT", 300)
+    start = time.monotonic()
+
+    def fail(error: str, data: dict | None = None) -> StageResult:
+        data = data or {}
+        return StageResult(False, "", _usage(data), _cost(data), time.monotonic() - start, error)
+
+    try:
+        # New session: on timeout the whole process group (CLI and its tools) is killed.
+        proc = subprocess.Popen(cmd, cwd=repo, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+    except OSError as e:
+        return fail(f"cannot run claude: {e.strerror or e}")
+    try:
+        stdout, _ = proc.communicate(prompt, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        proc.communicate()
+        return fail(f"timeout after {timeout}s")
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        if proc.returncode == 0:
+            return fail("invalid json")
+        data = {}
+    detail = data.get("terminal_reason") or data.get("api_error_status")
+    if not detail and isinstance(data.get("errors"), list) and data["errors"]:
+        detail = str(data["errors"][0])[:200]
+    suffix = f": {detail}" if detail else ""
+    if proc.returncode != 0:
+        return fail(f"exit {proc.returncode}{suffix}", data)
+    if data.get("is_error"):
+        return fail(f"claude error{suffix}", data)
+    if not isinstance(data.get("result"), str):
+        return fail("no result", data)
+    return StageResult(True, data["result"], _usage(data), _cost(data), time.monotonic() - start, None)
+
+
+def _fill(template: str, **values: str) -> str:
+    """Substitute {name} placeholders in one pass (inserted text is never re-scanned)."""
+    return _PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), template)
+
+
+def _load_prompt(name: str) -> str:
+    text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
+    if text.startswith("<!--"):  # first line is a lint directive for the repo, not for the model
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+    return text
+
+
+def _project_rules(rules: Rules) -> str:
+    return rules.text.strip() or "(none)"
+
+
+def _parse_json_list(text: str) -> list | None:
+    """The JSON array in the last ```json block of `text` (or `text` as a bare array); None if unparseable."""
+    blocks = _JSON_BLOCK.findall(text or "")
+    raw = blocks[-1] if blocks else (text or "")
+    try:
+        value = json.loads(raw.strip())
+    except ValueError:
+        return None
+    if isinstance(value, dict) and isinstance(value.get("findings"), list):
+        value = value["findings"]
+    return value if isinstance(value, list) else None
+
+
+def _severity(value, default: str = "MEDIUM") -> str:
+    sev = str(value or "").strip().upper()
+    if sev == "CRITICAL":
+        sev = "HIGH"
+    return sev if sev in SEVERITIES else default
+
+
+def _unparseable(res: StageResult) -> StageResult:
+    res.ok = False
+    res.error = "unparseable output"
+    return res
+
+
+def investigate(diff: str, truncated: bool, rules: Rules, repo: str) -> tuple[list[dict], StageResult]:
+    """Stage 1 (recall): candidate findings of any severity, `severity` normalised to HIGH/MEDIUM/LOW."""
+    note = ("NOTE: the diff below was truncated to stay within the size limit. Read the changed files in the "
+            "repository to see the rest of the change.") if truncated else ""
+    prompt = _fill(_load_prompt("investigate.md"), truncated_note=note,
+                   project_rules=_project_rules(rules), diff=diff)
+    res = run_claude(prompt, repo, rules)
+    if not res.ok:
+        return [], res
+    parsed = _parse_json_list(res.text)
+    if parsed is None:
+        return [], _unparseable(res)
+    found = [dict(item, severity=_severity(item.get("severity"))) for item in parsed if isinstance(item, dict)]
+    return found, res
+
+
+def refute(candidates: list[dict], diff: str, repo: str, rules: Rules) -> tuple[list[dict], StageResult]:
+    """Stage 2 (precision): candidates confirmed as HIGH or MEDIUM, enriched with `severity` and `reason`."""
+    if not candidates:
+        return [], StageResult(True, "", {}, 0.0, 0.0, None)
+    indexed = [dict(c, index=i) for i, c in enumerate(candidates)]
+    note = ("NOTE: the diff was truncated to stay within the size limit; read the files in the repository "
+            "for the rest.") if TRUNCATED_MARK in diff else ""
+    prompt = _fill(_load_prompt("refute.md"), truncated_note=note, project_rules=_project_rules(rules),
+                   candidates=json.dumps(indexed, indent=2, ensure_ascii=False), diff=diff)
+    res = run_claude(prompt, repo, rules)
+    if not res.ok:
+        return [], res
+    parsed = _parse_json_list(res.text)
+    if parsed is None:
+        return [], _unparseable(res)
+    verdicts: dict[int, dict] = {}
+    for v in parsed:
+        idx = v.get("index") if isinstance(v, dict) else None
+        if isinstance(idx, int) and not isinstance(idx, bool):
+            verdicts.setdefault(idx, v)
+    confirmed = []
+    for i, cand in enumerate(candidates):
+        v = verdicts.get(i)
+        if not v or str(v.get("verdict", "")).strip().lower() != "confirmed":
+            continue  # refuted or no verdict: precision first
+        sev = _severity(v.get("severity"), default=_severity(cand.get("severity")))
+        if sev in WAKE_SEVERITIES:
+            confirmed.append(dict(cand, severity=sev, reason=str(v.get("reason") or "")))
+    return confirmed, res
+
+
+def format_findings(findings: list[dict]) -> str:
+    """Text for the woken session: findings, HIGH first, grouped by file."""
+    order = {s: i for i, s in enumerate(SEVERITIES)}
+    by_file: dict[str, list[dict]] = {}
+    for f in sorted(findings, key=lambda f: order[_severity(f.get("severity"))]):
+        by_file.setdefault(str(f.get("file") or "unknown"), []).append(f)
+    lines = [
+        f"commit-sentry: {len(findings)} confirmed security finding(s).",
+        ("Address each one, or explain briefly why it does not apply (for example, the user explicitly asked for "
+         "this after the trade-off was explained). Do not dismiss a finding only because a service is internal."),
+        "",
+    ]
+    n = 1
+    for path, items in by_file.items():
+        for f in items:
+            loc = f"{path}:{f['line']}" if isinstance(f.get("line"), int) else path
+            lines.append(f"{n}. [{_severity(f.get('severity'))}] [{f.get('category') or 'unknown'}] {loc}")
+            lines.append(f"   {f.get('description') or 'N/A'}")
+            if f.get("exploit_scenario"):
+                lines.append(f"   Exploit: {f['exploit_scenario']}")
+            lines.append(f"   Fix: {f.get('recommendation') or 'N/A'}")
+            if f.get("reason"):
+                lines.append(f"   Verified: {f['reason']}")
+            lines.append("")
+            n += 1
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def main(argv=None) -> int:

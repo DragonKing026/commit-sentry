@@ -42,6 +42,17 @@ class StateTest(unittest.TestCase):
         os.environ["XDG_STATE_HOME"] = str(Path(self._tmp.name) / "xdg")
         self.assertEqual(cs.state_dir(), Path(self._tmp.name) / "xdg" / "commit-sentry")
 
+    def test_relative_xdg_state_home_ignored(self):
+        del os.environ["COMMIT_SENTRY_STATE_DIR"]
+        os.environ.pop("CLAUDE_PLUGIN_DATA", None)
+        os.environ["XDG_STATE_HOME"] = "relative/state"
+        home = Path(self._tmp.name) / "home"
+        saved = os.environ.get("HOME")
+        os.environ["HOME"] = str(home)
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", saved) if saved is not None
+                        else os.environ.pop("HOME", None))
+        self.assertEqual(cs.state_dir(), home / ".local" / "state" / "commit-sentry")
+
     def test_rate_limit(self):
         self.assertTrue(cs.take_rate_slot(1000.0, 2, 3600))
         self.assertTrue(cs.take_rate_slot(1001.0, 2, 3600))

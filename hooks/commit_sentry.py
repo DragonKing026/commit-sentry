@@ -2,7 +2,12 @@
 """commit-sentry: background two-stage security review of agent commits.
 
 Runs as a PostToolUse hook after `git commit` (see hooks/hooks.json).
-Python 3.11+, standard library only. Logic is added in later commits.
+Python 3.11+, standard library only.
+
+Flow: parse the commit from the Bash output, locate its repository, skip merge/empty/docs-only commits,
+then run two headless `claude -p` stages (investigate, then refute). Confirmed HIGH/MEDIUM findings are
+printed to stderr with exit 2 to wake the session; every outcome is appended to a JSONL log.
+`--review <sha>` runs the same pipeline by hand.
 """
 from __future__ import annotations
 
@@ -227,7 +232,9 @@ def state_dir() -> Path:
     if override:
         d = Path(override)
     else:
-        base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        base = os.environ.get("XDG_STATE_HOME") or ""
+        if not os.path.isabs(base):  # the XDG spec says to ignore relative paths
+            base = os.path.join(os.path.expanduser("~"), ".local", "state")
         d = Path(base) / "commit-sentry"
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -509,7 +516,7 @@ def _parse_json_list(text: str) -> list | None:
     return value if isinstance(value, list) else None
 
 
-def _severity(value, default: str = "MEDIUM") -> str:
+def _severity(value, default: str = "LOW") -> str:
     sev = str(value or "").strip().upper()
     if sev == "CRITICAL":
         sev = "HIGH"
@@ -540,15 +547,16 @@ def investigate(diff: str, truncated: bool, rules: Rules, repo: str) -> tuple[li
 
 
 def refute(candidates: list[dict], diff: str, repo: str, rules: Rules, *,
-           truncated: bool = False) -> tuple[list[dict], list[dict], StageResult]:
-    """Stage 2 (precision): (confirmed, refuted, result).
+           truncated: bool = False) -> tuple[list[dict], list[dict], list[dict], StageResult]:
+    """Stage 2 (precision): (confirmed, refuted, downgraded, result).
 
     `confirmed`: candidates confirmed as HIGH or MEDIUM, enriched with `severity` and `reason`.
     `refuted`: candidates refuted by the reviewer, enriched with its `reason` (for the log only).
+    `downgraded`: candidates confirmed but rated LOW by the reviewer, with its `reason` (for the log only).
     Every candidate needs a verdict; otherwise the stage fails with `missing verdicts`.
     """
     if not candidates:
-        return [], [], StageResult(True, "", {}, 0.0, 0.0, None)
+        return [], [], [], StageResult(True, "", {}, 0.0, 0.0, None)
     indexed = [dict(c, index=i) for i, c in enumerate(candidates)]
     note = ("NOTE: the diff was truncated to stay within the size limit; read the files in the repository "
             "for the rest.") if truncated else ""
@@ -556,10 +564,10 @@ def refute(candidates: list[dict], diff: str, repo: str, rules: Rules, *,
                      candidates=json.dumps(indexed, indent=2, ensure_ascii=False), diff=diff)
     res = run_claude(prompt, repo, rules)
     if not res.ok:
-        return [], [], res
+        return [], [], [], res
     parsed = _parse_json_list(res.text)
     if parsed is None:
-        return [], [], _failed(res, "unparseable output")
+        return [], [], [], _failed(res, "unparseable output")
     verdicts: dict[int, dict] = {}
     for v in parsed:
         idx = v.get("index") if isinstance(v, dict) else None
@@ -567,17 +575,17 @@ def refute(candidates: list[dict], diff: str, repo: str, rules: Rules, *,
                 and str(v.get("verdict", "")).strip().lower() in VERDICTS):
             verdicts.setdefault(idx, v)
     if len(verdicts) < len(candidates):
-        return [], [], _failed(res, "missing verdicts")
-    confirmed, refuted = [], []
+        return [], [], [], _failed(res, "missing verdicts")
+    confirmed, refuted, downgraded = [], [], []
     for i, cand in enumerate(candidates):
         v = verdicts[i]
         if str(v["verdict"]).strip().lower() != "confirmed":
             refuted.append(dict(cand, reason=str(v.get("reason") or "")))
             continue
         sev = _severity(v.get("severity"), default=_severity(cand.get("severity")))
-        if sev in WAKE_SEVERITIES:
-            confirmed.append(dict(cand, severity=sev, reason=str(v.get("reason") or "")))
-    return confirmed, refuted, res
+        item = dict(cand, severity=sev, reason=str(v.get("reason") or ""))
+        (confirmed if sev in WAKE_SEVERITIES else downgraded).append(item)
+    return confirmed, refuted, downgraded, res
 
 
 def _clip(value, cap: int = FIELD_CAP) -> str:
@@ -629,9 +637,9 @@ def _stage_record(name: str, res: StageResult) -> dict:
 
 def run_review(repo: str, commit: Commit, rules: Rules) -> dict:
     """Both stages. Returns outcome ('clean', 'findings' or 'failed'), reason, stages, candidates, confirmed,
-    refuted."""
+    refuted, downgraded."""
     out: dict = {"outcome": "clean", "reason": None, "stages": [], "candidates": [], "confirmed": [],
-                 "refuted": []}
+                 "refuted": [], "downgraded": []}
     diff, truncated = commit_diff(repo, commit, rules)
     candidates, res = investigate(diff, truncated, rules, repo)
     out["stages"].append(_stage_record("investigate", res))
@@ -642,13 +650,14 @@ def run_review(repo: str, commit: Commit, rules: Rules) -> dict:
     significant = [c for c in candidates if c.get("severity") in WAKE_SEVERITIES]
     if not significant:
         return out
-    confirmed, refuted, res = refute(significant, diff, repo, rules, truncated=truncated)
+    confirmed, refuted, downgraded, res = refute(significant, diff, repo, rules, truncated=truncated)
     out["stages"].append(_stage_record("refute", res))
     if not res.ok:
         out.update(outcome="failed", reason=res.error or "unknown")
         return out
     out["confirmed"] = confirmed
     out["refuted"] = refuted
+    out["downgraded"] = downgraded
     if confirmed:
         out["outcome"] = "findings"
     return out
@@ -656,13 +665,15 @@ def run_review(repo: str, commit: Commit, rules: Rules) -> dict:
 
 def _log(session_id: str, repo: str, commit: Commit | None, outcome: str, reason: str | None = None, *,
          stages: list | None = None, candidates: list | None = None, confirmed: list | None = None,
-         refuted: list | None = None, error: str | None = None) -> None:
+         refuted: list | None = None, downgraded: list | None = None,
+         error: str | None = None, sha: str | None = None) -> None:
     stages = stages or []
     append_log({
-        "session_id": session_id, "repo": repo, "sha": commit.sha if commit else None,
+        "session_id": session_id, "repo": repo, "sha": commit.sha if commit else sha,
         "files": len(commit.files) if commit else 0, "outcome": outcome, "reason": reason,
         "stages": stages, "cost_usd": round(sum(s["cost_usd"] for s in stages), 6),
-        "candidates": candidates or [], "confirmed": confirmed or [], "refuted": refuted or [], "error": error,
+        "candidates": candidates or [], "confirmed": confirmed or [], "refuted": refuted or [],
+        "downgraded": downgraded or [], "error": error,
     })
 
 
@@ -736,6 +747,7 @@ def _hook(stdin, stderr) -> int:
             return 0
         commit = ctx["commit"] = resolve_commit(repo, short)
         if commit is None:
+            _safe_log(ctx["session_id"], repo, None, "skipped", f"commit-not-found:{short[:7]}", sha=short)
             return 0
         sid = ctx["session_id"]
         rules = load_rules(repo)
@@ -752,6 +764,7 @@ def _hook(stdin, stderr) -> int:
             stderr.write(text)  # before logging: a logging error must not lose the findings
         _safe_log(sid, repo, commit, res["outcome"], res["reason"], stages=res["stages"],
                   candidates=res["candidates"], confirmed=res["confirmed"], refuted=res["refuted"],
+                  downgraded=res["downgraded"],
                   error=res["reason"] if res["outcome"] == "failed" else None)
         if res["outcome"] == "failed":
             return _failure_notice(sid, commit.sha, res["reason"], stderr)
@@ -801,6 +814,7 @@ def _manual(argv: list[str], stdout) -> int:
             code = 0
         _safe_log("manual", repo, commit, res["outcome"], res["reason"], stages=res["stages"],
                   candidates=res["candidates"], confirmed=res["confirmed"], refuted=res["refuted"],
+                  downgraded=res["downgraded"],
                   error=res["reason"] if res["outcome"] == "failed" else None)
         return code
     except Exception as e:

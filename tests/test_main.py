@@ -86,6 +86,16 @@ class HookTests(MainTestBase):
         self.assertEqual(len(rec["candidates"]), 1)
         self.assertEqual(len(self.calls()), 1)
 
+    def test_hook_downgraded_is_logged(self):
+        verdict = [{"index": 0, "verdict": "confirmed", "severity": "LOW", "reason": "local only"}]
+        self.reply(ok_reply(fenced([CAND])), ok_reply(fenced(verdict)))
+        self.assertEqual(self.run_hook(self.hook_input()), (0, ""))
+        rec = self.log()[-1]
+        self.assertEqual(rec["outcome"], "clean")
+        self.assertEqual(rec["confirmed"], [])
+        self.assertEqual([d["reason"] for d in rec["downgraded"]], ["local only"])
+        self.assertEqual(rec["downgraded"][0]["file"], CAND["file"])
+
     def test_hook_clean_after_refute(self):
         refuted = [{"index": 0, "verdict": "refuted", "reason": "sanitised"}]
         self.reply(ok_reply(fenced([CAND])), ok_reply(fenced(refuted)))
@@ -137,12 +147,15 @@ class HookTests(MainTestBase):
         self.assertEqual(self.log(), [])
         self.assertFalse(self.record.exists())
 
-    def test_hook_unknown_sha_silent(self):
+    def test_hook_unresolved_sha_is_logged_as_skipped(self):
         payload = json.dumps({"session_id": "s", "cwd": self.repo, "tool_input": {"command": "git commit"},
                               "tool_response": {"stdout": "[main deadbee] c"}})
         git(self.repo, "commit", "-q", "--allow-empty", "-m", "x")
         self.assertEqual(self.run_hook(payload), (0, ""))
-        self.assertEqual(self.log(), [])
+        rec = self.log()[-1]
+        self.assertEqual((rec["outcome"], rec["reason"], rec["sha"]), ("skipped", "commit-not-found:deadbee", "deadbee"))
+        self.assertEqual(rec["repo"], str(Path(self.repo).resolve()))
+        self.assertFalse(self.record.exists())
 
     def test_hook_invalid_json(self):
         code, err = self.run_hook("not json")

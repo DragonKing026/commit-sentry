@@ -256,15 +256,24 @@ class StageTests(ReviewerTestBase):
             {"index": 2, "verdict": "confirmed", "severity": "LOW", "reason": "local only"},
         ]
         self.reply(ok_reply(fenced(verdicts)))
-        confirmed, refuted, res = cs.refute(cands, "diff", self.repo, cs.Rules())
+        confirmed, refuted, downgraded, res = cs.refute(cands, "diff", self.repo, cs.Rules())
         self.assertTrue(res.ok)
         self.assertEqual([(r["file"], r["reason"]) for r in refuted], [("b.py", "sanitized")])
         self.assertEqual(len(confirmed), 1)
         self.assertEqual(confirmed[0]["file"], "a.py")
         self.assertEqual(confirmed[0]["severity"], "HIGH")
         self.assertEqual(confirmed[0]["reason"], "reachable")
+        self.assertEqual([(d["file"], d["reason"]) for d in downgraded], [("c.py", "local only")])
         prompt = self.calls()[0]["stdin"]
         self.assertIn('"index": 2', prompt)
+
+    def test_unknown_or_missing_severity_is_low_and_not_refuted(self):
+        found = [dict(CAND, severity="info"), {k: v for k, v in CAND.items() if k != "severity"}]
+        self.reply(ok_reply(fenced(found)))
+        out = cs.run_review(self.repo, self.commit({"a.py": "x = 1\n"}), cs.Rules())
+        self.assertEqual([c["severity"] for c in out["candidates"]], ["LOW", "LOW"])
+        self.assertEqual(out["outcome"], "clean")
+        self.assertEqual(len(self.calls()), 1)  # no refute stage
 
     def test_investigate_non_dict_items_unparseable(self):
         self.reply(ok_reply(fenced(["a string", 3])))
@@ -291,8 +300,8 @@ class StageTests(ReviewerTestBase):
         for name, verdicts in cases.items():
             with self.subTest(name):
                 self.reply(ok_reply(fenced(verdicts)))
-                confirmed, refuted, res = cs.refute(cands, "diff", self.repo, cs.Rules())
-                self.assertEqual((confirmed, refuted), ([], []))
+                confirmed, refuted, downgraded, res = cs.refute(cands, "diff", self.repo, cs.Rules())
+                self.assertEqual((confirmed, refuted, downgraded), ([], [], []))
                 self.assertFalse(res.ok)
                 self.assertEqual(res.error, "missing verdicts")
 
@@ -324,10 +333,10 @@ class StageTests(ReviewerTestBase):
     def test_refute_severity_fallback_and_empty(self):
         cands = [dict(CAND, severity="MEDIUM")]
         self.reply(ok_reply(fenced([{"index": 0, "verdict": "confirmed", "reason": "r"}])))
-        confirmed, _, _ = cs.refute(cands, "diff", self.repo, cs.Rules())
+        confirmed, _, _, _ = cs.refute(cands, "diff", self.repo, cs.Rules())
         self.assertEqual(confirmed[0]["severity"], "MEDIUM")
-        confirmed, refuted, res = cs.refute([], "diff", self.repo, cs.Rules())
-        self.assertEqual((confirmed, refuted), ([], []))
+        confirmed, refuted, downgraded, res = cs.refute([], "diff", self.repo, cs.Rules())
+        self.assertEqual((confirmed, refuted, downgraded), ([], [], []))
         self.assertTrue(res.ok)
         self.assertEqual(len(self.calls()), 1)  # no CLI call for an empty list
 

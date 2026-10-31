@@ -3,8 +3,6 @@
 A Claude Code plugin that reviews every commit your agent makes for security problems, in the background,
 and wakes the session only when a finding survives a second, skeptical pass.
 
-> Status: early draft (0.1.0). The review logic lands in later commits.
-
 ## What it does
 
 After each `git commit` run by the agent, commit-sentry starts a headless review of that commit. Stage 1 looks for
@@ -46,21 +44,58 @@ Environment variables:
 | `COMMIT_SENTRY_CLAUDE` | `claude` | Path of the CLI to run (useful for tests). |
 | `COMMIT_SENTRY_STATE_DIR` | plugin data dir / `XDG_STATE_HOME` | Overrides where the log and rate-limit state live. |
 
-Per repository: `git config commit-sentry.enabled false` disables the review there.
+## Disable
+
+- Everywhere: `COMMIT_SENTRY_DISABLE=1` in the environment of the session.
+- Per repository: `git config commit-sentry.enabled false`.
+
+## Manual review
+
+```
+python3 hooks/commit_sentry.py --review <sha> [--repo DIR] [--force]
+```
+
+Runs the same two stages on any commit and prints the result to stdout (no hourly limit, no session state).
+Exit code 0: no confirmed findings (or skipped), 1: confirmed findings, 2: the review failed. Merge commits and
+docs-only commits are skipped unless you pass `--force` (docs-only only). The run is written to the log with
+`session_id` `manual`.
 
 ## Project rules file
 
-Put project-specific security rules in `.claude/commit-sentry.md` (for example "all SQL goes through the query
-builder", "ignore the `fixtures/` directory"). Its content is added to the review prompts. Details TBD in later commits.
+Put project-specific security rules in `.claude/commit-sentry.md`. Optional front matter adds to the built-in
+glob lists (comma-separated, matched with fnmatch; a pattern without `/` matches the file name only):
+
+```
+---
+docs-only: *.adoc, docs/*
+always-review: scripts/*
+deny-read: secrets/*.json
+---
+Free text, added to both review prompts: for example "all SQL goes through the query builder".
+```
+
+- `docs-only`: files that do not trigger a review when a commit contains nothing else.
+- `always-review`: files that always do, even if they also match `docs-only` (defaults include `SKILL.md`,
+  `CLAUDE.md`, `AGENTS.md`, `.claude/*`, hooks, agents, rules, `.mcp.json`).
+- `deny-read`: files left out of the diff and denied to the reviewer's file tools (defaults include `.env*`, `*.pem`,
+  `*.key`, `id_rsa*`, `Sensitive-data/*`).
 
 ## Log
 
-Every review (and every skip or failure) is appended to a log in the state directory. Format and location: TBD in later commits.
+Every review, skip and failure is appended as one JSON line to `reviews.jsonl` in the state directory
+(`COMMIT_SENTRY_STATE_DIR`, else `CLAUDE_PLUGIN_DATA`, else `$XDG_STATE_HOME/commit-sentry`, else
+`~/.local/state/commit-sentry`; mode 0700). Fields: `ts`, `session_id`, `repo`, `sha`, `files` (count), `outcome`
+(`clean`, `findings`, `skipped`, `failed`), `reason`, `stages` (per stage: `name`, `duration_s`, `input_tokens`,
+`output_tokens`, `cache_read`, `cache_creation`, `cost_usd`), `cost_usd` (sum), `candidates` (all stage 1
+findings, including LOW), `confirmed`, `error`. The log contains finding descriptions, so treat it as sensitive.
+
+A failure (no login, quota, timeout, rate limit, internal error) wakes the session once per session with a
+one-line notice; later failures in that session are only logged.
 
 ## Privacy
 
-The diff of the commit (size-limited; binary files and files matched by your `deny-read` permissions are left out),
-the commit message, your `.claude/commit-sentry.md` and whatever files the reviewer reads with `Read`, `Grep` and
+The diff of the commit only, not the commit message (size-limited; binary files and files matched by your `deny-read` permissions are left out),
+your `.claude/commit-sentry.md` and whatever files the reviewer reads with `Read`, `Grep` and
 `Glob` are sent to the model through the `claude` CLI, under your own account and its data terms. Do not enable the
 plugin in repositories whose content must not be sent to Anthropic.
 
@@ -75,7 +110,7 @@ to `deny-read`. Admin-managed (policy) settings still apply and could widen the 
 ## Cost
 
 Each review runs up to two Opus sessions and uses your subscription or API quota. The hourly limit
-(`COMMIT_SENTRY_MAX_PER_HOUR`) caps the spend. Typical numbers: TBD in later commits.
+(`COMMIT_SENTRY_MAX_PER_HOUR`) caps the spend. The cost of every stage is recorded in the log (`cost_usd`); stage 2 runs only when stage 1 finds a HIGH or MEDIUM candidate, so most commits cost one session.
 
 ## License
 

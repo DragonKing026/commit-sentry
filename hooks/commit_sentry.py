@@ -606,8 +606,188 @@ def format_findings(findings: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def main(argv=None) -> int:
-    return 0
+# --- Pipeline and entry points ----------------------------------------------
+
+def _stage_record(name: str, res: StageResult) -> dict:
+    u = res.usage
+    return {"name": name, "duration_s": round(res.duration_s, 2),
+            "input_tokens": u.get("input_tokens", 0), "output_tokens": u.get("output_tokens", 0),
+            "cache_read": u.get("cache_read", 0), "cache_creation": u.get("cache_creation", 0),
+            "cost_usd": round(res.cost_usd, 6)}
+
+
+def run_review(repo: str, commit: Commit, rules: Rules) -> dict:
+    """Both stages. Returns outcome ('clean', 'findings' or 'failed'), reason, stages, candidates, confirmed."""
+    out: dict = {"outcome": "clean", "reason": None, "stages": [], "candidates": [], "confirmed": []}
+    diff, truncated = commit_diff(repo, commit, rules)
+    candidates, res = investigate(diff, truncated, rules, repo)
+    out["stages"].append(_stage_record("investigate", res))
+    if not res.ok:
+        out.update(outcome="failed", reason=res.error or "unknown")
+        return out
+    out["candidates"] = candidates
+    significant = [c for c in candidates if c.get("severity") in WAKE_SEVERITIES]
+    if not significant:
+        return out
+    confirmed, res = refute(significant, diff, repo, rules, truncated=truncated)
+    out["stages"].append(_stage_record("refute", res))
+    if not res.ok:
+        out.update(outcome="failed", reason=res.error or "unknown")
+        return out
+    out["confirmed"] = confirmed
+    if confirmed:
+        out["outcome"] = "findings"
+    return out
+
+
+def _log(session_id: str, repo: str, commit: Commit | None, outcome: str, reason: str | None = None, *,
+         stages: list | None = None, candidates: list | None = None, confirmed: list | None = None,
+         error: str | None = None) -> None:
+    stages = stages or []
+    append_log({
+        "session_id": session_id, "repo": repo, "sha": commit.sha if commit else None,
+        "files": len(commit.files) if commit else 0, "outcome": outcome, "reason": reason,
+        "stages": stages, "cost_usd": round(sum(s["cost_usd"] for s in stages), 6),
+        "candidates": candidates or [], "confirmed": confirmed or [], "error": error,
+    })
+
+
+def _failure_notice(session_id: str, sha: str | None, reason: str, stderr) -> int:
+    """Exit 2 with a one-line notice the first time a session sees a failure, else 0."""
+    try:
+        if not first_failure(session_id):
+            return 0
+        try:
+            where = str(log_path())
+        except Exception:
+            where = "?"
+        stderr.write(f"commit-sentry: review of {(sha or '?')[:7]} failed ({reason}); log: {where}\n")
+        return 2
+    except Exception:
+        return 0
+
+
+def _commit_sha(data: dict) -> str | None:
+    resp = data.get("tool_response")
+    if isinstance(resp, dict):
+        op = resp.get("gitOperation")
+        commit = op.get("commit") if isinstance(op, dict) else None
+        sha = commit.get("sha") if isinstance(commit, dict) else None
+        if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{7,40}", sha):
+            return sha
+        stdout = resp.get("stdout")
+        return parse_commit_output(stdout if isinstance(stdout, str) else "")
+    return parse_commit_output(resp) if isinstance(resp, str) else None
+
+
+def _hook(stdin, stderr) -> int:
+    if os.environ.get("COMMIT_SENTRY_DISABLE") == "1" or os.environ.get("COMMIT_SENTRY_ACTIVE") == "1":
+        return 0
+    ctx: dict = {"session_id": "unknown", "repo": "", "commit": None, "short": None}
+    try:
+        try:
+            data = json.loads(stdin.read())
+        except ValueError as e:
+            raise ValueError(f"invalid hook input: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError("invalid hook input: not an object")
+        ctx["session_id"] = str(data.get("session_id") or "unknown")
+        short = ctx["short"] = _commit_sha(data)
+        if not short:
+            return 0
+        tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+        repo = ctx["repo"] = target_repo(str(tool_input.get("command") or ""),
+                                         str(data.get("cwd") or os.getcwd()))
+        if _git(repo, "config", "--get", "commit-sentry.enabled").stdout.strip().lower() == "false":
+            return 0
+        commit = ctx["commit"] = resolve_commit(repo, short)
+        if commit is None:
+            return 0
+        sid = ctx["session_id"]
+        rules = load_rules(repo)
+        reason = skip_reason(commit, rules)
+        if reason:
+            _log(sid, repo, commit, "skipped", reason)
+            return 0
+        if not take_rate_slot(time.time(), _env_int("COMMIT_SENTRY_MAX_PER_HOUR", 20), 3600):
+            _log(sid, repo, commit, "skipped", "rate")
+            return _failure_notice(sid, commit.sha, "rate limit reached", stderr)
+        res = run_review(repo, commit, rules)
+        _log(sid, repo, commit, res["outcome"], res["reason"], stages=res["stages"],
+             candidates=res["candidates"], confirmed=res["confirmed"],
+             error=res["reason"] if res["outcome"] == "failed" else None)
+        if res["outcome"] == "failed":
+            return _failure_notice(sid, commit.sha, res["reason"], stderr)
+        if res["outcome"] == "findings":
+            stderr.write(format_findings(res["confirmed"]))
+            return 2
+        return 0
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+        try:
+            _log(ctx["session_id"], ctx["repo"], ctx["commit"], "failed", error, error=error)
+        except Exception:
+            pass
+        sha = ctx["commit"].sha if ctx["commit"] else ctx["short"]
+        return _failure_notice(ctx["session_id"], sha, error, stderr)
+
+
+def _manual(argv: list[str], stdout) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="commit_sentry.py --review", add_help=False)
+    ap.add_argument("sha")
+    ap.add_argument("--repo", default=None)
+    ap.add_argument("--force", action="store_true")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit:
+        stdout.write("Usage: commit_sentry.py --review <sha> [--repo DIR] [--force]\n")
+        return 2
+    try:
+        repo = target_repo("", args.repo or os.getcwd())
+        commit = resolve_commit(repo, args.sha)
+        if commit is None:
+            stdout.write(f"Review failed: commit not found: {args.sha}\n")
+            return 2
+        rules = load_rules(repo)
+        reason = skip_reason(commit, rules)
+        if reason and not (args.force and reason in ("docs-only", "empty")):
+            _log("manual", repo, commit, "skipped", reason)
+            stdout.write(f"Skipped: {reason}\n")
+            return 0
+        res = run_review(repo, commit, rules)
+        _log("manual", repo, commit, res["outcome"], res["reason"], stages=res["stages"],
+             candidates=res["candidates"], confirmed=res["confirmed"],
+             error=res["reason"] if res["outcome"] == "failed" else None)
+        if res["outcome"] == "failed":
+            stdout.write(f"Review failed: {res['reason']}\n")
+            return 2
+        if res["confirmed"]:
+            stdout.write(format_findings(res["confirmed"]))
+            return 1
+        stdout.write("No confirmed findings.\n")
+        return 0
+    except Exception as e:
+        stdout.write(f"Review failed: {type(e).__name__}: {e}\n")
+        try:
+            _log("manual", args.repo or "", None, "failed", f"{type(e).__name__}: {e}",
+                 error=f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return 2
+
+
+def main(argv=None, stdin=None, stderr=None, stdout=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    stdin = stdin or sys.stdin
+    stderr = stderr or sys.stderr
+    stdout = stdout or sys.stdout
+    if argv[:1] == ["--hook"]:
+        return _hook(stdin, stderr)
+    if argv[:1] == ["--review"]:
+        return _manual(argv[1:], stdout)
+    stdout.write("Usage: commit_sentry.py --hook | --review <sha> [--repo DIR] [--force]\n")
+    return 2
 
 
 if __name__ == "__main__":

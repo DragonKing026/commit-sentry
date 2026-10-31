@@ -6,13 +6,18 @@ Python 3.11+, standard library only. Logic is added in later commits.
 """
 from __future__ import annotations
 
+import fcntl
 import fnmatch
+import hashlib
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
 DOCS_ONLY = ["*.md", "*.txt", "*.rst", "CHANGELOG*", "changelog.md"]
 ALWAYS_REVIEW = [
@@ -211,6 +216,69 @@ def skip_reason(commit: Commit, rules: Rules) -> str | None:
     if all(matches(f, rules.docs_only) and not matches(f, rules.always_review) for f in commit.files):
         return "docs-only"
     return None
+
+
+def state_dir() -> Path:
+    """Directory for rate limit, failure markers and the log (created with mode 0700)."""
+    override = os.environ.get("COMMIT_SENTRY_STATE_DIR") or os.environ.get("CLAUDE_PLUGIN_DATA")
+    if override:
+        d = Path(override)
+    else:
+        base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        d = Path(base) / "commit-sentry"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
+    return d
+
+
+def log_path() -> Path:
+    return state_dir() / "reviews.jsonl"
+
+
+def take_rate_slot(now: float, limit: int, window: int) -> bool:
+    """Record a review start if fewer than `limit` happened in the last `window` seconds."""
+    d = state_dir()
+    with open(d / "rate.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = d / "rate.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            stamps = [float(t) for t in data if isinstance(t, (int, float))]
+        except (OSError, ValueError, TypeError):
+            stamps = []
+        stamps = [t for t in stamps if now - t < window]
+        ok = len(stamps) < limit
+        if ok:
+            stamps.append(now)
+        tmp = d / f"rate.json.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(stamps), encoding="utf-8")
+        os.replace(tmp, path)
+        return ok
+
+
+def first_failure(session_id: str) -> bool:
+    """True only the first time it is called for this session (race-safe marker file)."""
+    name = "failed-" + hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    try:
+        fd = os.open(state_dir() / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
+
+
+def append_log(record: dict) -> None:
+    """Append one JSON line to reviews.jsonl, adding `ts` unless provided."""
+    rec = dict(record)
+    rec.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    line = json.dumps(rec, ensure_ascii=False) + "\n"
+    with open(log_path(), "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(line)
+        f.flush()
 
 
 def main(argv=None) -> int:

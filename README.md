@@ -87,7 +87,8 @@ Every review, skip and failure is appended as one JSON line to `reviews.jsonl` i
 `~/.local/state/commit-sentry`; mode 0700). Fields: `ts`, `session_id`, `repo`, `sha`, `files` (count), `outcome`
 (`clean`, `findings`, `skipped`, `failed`), `reason`, `stages` (per stage: `name`, `duration_s`, `input_tokens`,
 `output_tokens`, `cache_read`, `cache_creation`, `cost_usd`), `cost_usd` (sum), `candidates` (all stage 1
-findings, including LOW), `confirmed`, `error`. The log contains finding descriptions, so treat it as sensitive.
+findings, including LOW), `confirmed`, `refuted` (candidates rejected in stage 2, each with the reviewer's
+`reason`), `error`. The log contains finding descriptions, so treat it as sensitive.
 
 A failure (no login, quota, timeout, rate limit, internal error) wakes the session once per session with a
 one-line notice; later failures in that session are only logged.

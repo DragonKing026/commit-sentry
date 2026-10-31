@@ -540,13 +540,15 @@ def investigate(diff: str, truncated: bool, rules: Rules, repo: str) -> tuple[li
 
 
 def refute(candidates: list[dict], diff: str, repo: str, rules: Rules, *,
-           truncated: bool = False) -> tuple[list[dict], StageResult]:
-    """Stage 2 (precision): candidates confirmed as HIGH or MEDIUM, enriched with `severity` and `reason`.
+           truncated: bool = False) -> tuple[list[dict], list[dict], StageResult]:
+    """Stage 2 (precision): (confirmed, refuted, result).
 
+    `confirmed`: candidates confirmed as HIGH or MEDIUM, enriched with `severity` and `reason`.
+    `refuted`: candidates refuted by the reviewer, enriched with its `reason` (for the log only).
     Every candidate needs a verdict; otherwise the stage fails with `missing verdicts`.
     """
     if not candidates:
-        return [], StageResult(True, "", {}, 0.0, 0.0, None)
+        return [], [], StageResult(True, "", {}, 0.0, 0.0, None)
     indexed = [dict(c, index=i) for i, c in enumerate(candidates)]
     note = ("NOTE: the diff was truncated to stay within the size limit; read the files in the repository "
             "for the rest.") if truncated else ""
@@ -554,10 +556,10 @@ def refute(candidates: list[dict], diff: str, repo: str, rules: Rules, *,
                      candidates=json.dumps(indexed, indent=2, ensure_ascii=False), diff=diff)
     res = run_claude(prompt, repo, rules)
     if not res.ok:
-        return [], res
+        return [], [], res
     parsed = _parse_json_list(res.text)
     if parsed is None:
-        return [], _failed(res, "unparseable output")
+        return [], [], _failed(res, "unparseable output")
     verdicts: dict[int, dict] = {}
     for v in parsed:
         idx = v.get("index") if isinstance(v, dict) else None
@@ -565,16 +567,17 @@ def refute(candidates: list[dict], diff: str, repo: str, rules: Rules, *,
                 and str(v.get("verdict", "")).strip().lower() in VERDICTS):
             verdicts.setdefault(idx, v)
     if len(verdicts) < len(candidates):
-        return [], _failed(res, "missing verdicts")
-    confirmed = []
+        return [], [], _failed(res, "missing verdicts")
+    confirmed, refuted = [], []
     for i, cand in enumerate(candidates):
         v = verdicts[i]
         if str(v["verdict"]).strip().lower() != "confirmed":
+            refuted.append(dict(cand, reason=str(v.get("reason") or "")))
             continue
         sev = _severity(v.get("severity"), default=_severity(cand.get("severity")))
         if sev in WAKE_SEVERITIES:
             confirmed.append(dict(cand, severity=sev, reason=str(v.get("reason") or "")))
-    return confirmed, res
+    return confirmed, refuted, res
 
 
 def _clip(value, cap: int = FIELD_CAP) -> str:
@@ -625,8 +628,10 @@ def _stage_record(name: str, res: StageResult) -> dict:
 
 
 def run_review(repo: str, commit: Commit, rules: Rules) -> dict:
-    """Both stages. Returns outcome ('clean', 'findings' or 'failed'), reason, stages, candidates, confirmed."""
-    out: dict = {"outcome": "clean", "reason": None, "stages": [], "candidates": [], "confirmed": []}
+    """Both stages. Returns outcome ('clean', 'findings' or 'failed'), reason, stages, candidates, confirmed,
+    refuted."""
+    out: dict = {"outcome": "clean", "reason": None, "stages": [], "candidates": [], "confirmed": [],
+                 "refuted": []}
     diff, truncated = commit_diff(repo, commit, rules)
     candidates, res = investigate(diff, truncated, rules, repo)
     out["stages"].append(_stage_record("investigate", res))
@@ -637,12 +642,13 @@ def run_review(repo: str, commit: Commit, rules: Rules) -> dict:
     significant = [c for c in candidates if c.get("severity") in WAKE_SEVERITIES]
     if not significant:
         return out
-    confirmed, res = refute(significant, diff, repo, rules, truncated=truncated)
+    confirmed, refuted, res = refute(significant, diff, repo, rules, truncated=truncated)
     out["stages"].append(_stage_record("refute", res))
     if not res.ok:
         out.update(outcome="failed", reason=res.error or "unknown")
         return out
     out["confirmed"] = confirmed
+    out["refuted"] = refuted
     if confirmed:
         out["outcome"] = "findings"
     return out
@@ -650,13 +656,13 @@ def run_review(repo: str, commit: Commit, rules: Rules) -> dict:
 
 def _log(session_id: str, repo: str, commit: Commit | None, outcome: str, reason: str | None = None, *,
          stages: list | None = None, candidates: list | None = None, confirmed: list | None = None,
-         error: str | None = None) -> None:
+         refuted: list | None = None, error: str | None = None) -> None:
     stages = stages or []
     append_log({
         "session_id": session_id, "repo": repo, "sha": commit.sha if commit else None,
         "files": len(commit.files) if commit else 0, "outcome": outcome, "reason": reason,
         "stages": stages, "cost_usd": round(sum(s["cost_usd"] for s in stages), 6),
-        "candidates": candidates or [], "confirmed": confirmed or [], "error": error,
+        "candidates": candidates or [], "confirmed": confirmed or [], "refuted": refuted or [], "error": error,
     })
 
 
@@ -745,7 +751,7 @@ def _hook(stdin, stderr) -> int:
         if text:
             stderr.write(text)  # before logging: a logging error must not lose the findings
         _safe_log(sid, repo, commit, res["outcome"], res["reason"], stages=res["stages"],
-                  candidates=res["candidates"], confirmed=res["confirmed"],
+                  candidates=res["candidates"], confirmed=res["confirmed"], refuted=res["refuted"],
                   error=res["reason"] if res["outcome"] == "failed" else None)
         if res["outcome"] == "failed":
             return _failure_notice(sid, commit.sha, res["reason"], stderr)
@@ -794,7 +800,7 @@ def _manual(argv: list[str], stdout) -> int:
             stdout.write("No confirmed findings.\n")
             code = 0
         _safe_log("manual", repo, commit, res["outcome"], res["reason"], stages=res["stages"],
-                  candidates=res["candidates"], confirmed=res["confirmed"],
+                  candidates=res["candidates"], confirmed=res["confirmed"], refuted=res["refuted"],
                   error=res["reason"] if res["outcome"] == "failed" else None)
         return code
     except Exception as e:

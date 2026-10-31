@@ -53,6 +53,7 @@ class HookTests(MainTestBase):
         self.assertEqual(rec["session_id"], "s1")
         self.assertEqual(len(rec["candidates"]), 2)
         self.assertEqual(len(rec["confirmed"]), 1)
+        self.assertEqual(rec["refuted"], [])
         self.assertEqual([s["name"] for s in rec["stages"]], ["investigate", "refute"])
         self.assertAlmostEqual(rec["cost_usd"], 1.0)
         self.assertEqual(rec["files"], 1)
@@ -90,7 +91,12 @@ class HookTests(MainTestBase):
         self.reply(ok_reply(fenced([CAND])), ok_reply(fenced(refuted)))
         code, err = self.run_hook(self.hook_input())
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual(self.log()[-1]["outcome"], "clean")
+        rec = self.log()[-1]
+        self.assertEqual(rec["outcome"], "clean")
+        self.assertEqual(rec["confirmed"], [])
+        self.assertEqual(len(rec["refuted"]), 1)
+        self.assertEqual(rec["refuted"][0]["reason"], "sanitised")
+        self.assertEqual(rec["refuted"][0]["file"], CAND["file"])
 
     def test_hook_failed_once_per_session(self):
         os.environ["FAKE_CLAUDE_REPLY"] = ""
@@ -231,6 +237,15 @@ class ReviewModeTests(MainTestBase):
         self.assertIn("user input reaches os.system", out)
         rec = json.loads((self.state / "reviews.jsonl").read_text().splitlines()[-1])
         self.assertEqual((rec["session_id"], rec["outcome"]), ("manual", "findings"))
+
+    def test_review_mode_logs_refuted(self):
+        c = self.commit({"a.py": "import os\nos.system(input())\n"})
+        refuted = [{"index": 0, "verdict": "refuted", "reason": "input is a constant (a.py:2)"}]
+        self.reply(ok_reply(fenced([CAND])), ok_reply(fenced(refuted)))
+        self.assertEqual(self.review(c.sha, "--repo", self.repo), (0, "No confirmed findings.\n"))
+        rec = json.loads((self.state / "reviews.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(rec["outcome"], "clean")
+        self.assertEqual([r["reason"] for r in rec["refuted"]], ["input is a constant (a.py:2)"])
 
     def test_review_mode_clean_and_failed(self):
         c = self.commit({"a.py": "x = 1\n"})

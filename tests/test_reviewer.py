@@ -256,8 +256,9 @@ class StageTests(ReviewerTestBase):
             {"index": 2, "verdict": "confirmed", "severity": "LOW", "reason": "local only"},
         ]
         self.reply(ok_reply(fenced(verdicts)))
-        confirmed, res = cs.refute(cands, "diff", self.repo, cs.Rules())
+        confirmed, refuted, res = cs.refute(cands, "diff", self.repo, cs.Rules())
         self.assertTrue(res.ok)
+        self.assertEqual([(r["file"], r["reason"]) for r in refuted], [("b.py", "sanitized")])
         self.assertEqual(len(confirmed), 1)
         self.assertEqual(confirmed[0]["file"], "a.py")
         self.assertEqual(confirmed[0]["severity"], "HIGH")
@@ -290,8 +291,8 @@ class StageTests(ReviewerTestBase):
         for name, verdicts in cases.items():
             with self.subTest(name):
                 self.reply(ok_reply(fenced(verdicts)))
-                confirmed, res = cs.refute(cands, "diff", self.repo, cs.Rules())
-                self.assertEqual(confirmed, [])
+                confirmed, refuted, res = cs.refute(cands, "diff", self.repo, cs.Rules())
+                self.assertEqual((confirmed, refuted), ([], []))
                 self.assertFalse(res.ok)
                 self.assertEqual(res.error, "missing verdicts")
 
@@ -323,10 +324,10 @@ class StageTests(ReviewerTestBase):
     def test_refute_severity_fallback_and_empty(self):
         cands = [dict(CAND, severity="MEDIUM")]
         self.reply(ok_reply(fenced([{"index": 0, "verdict": "confirmed", "reason": "r"}])))
-        confirmed, _ = cs.refute(cands, "diff", self.repo, cs.Rules())
+        confirmed, _, _ = cs.refute(cands, "diff", self.repo, cs.Rules())
         self.assertEqual(confirmed[0]["severity"], "MEDIUM")
-        confirmed, res = cs.refute([], "diff", self.repo, cs.Rules())
-        self.assertEqual(confirmed, [])
+        confirmed, refuted, res = cs.refute([], "diff", self.repo, cs.Rules())
+        self.assertEqual((confirmed, refuted), ([], []))
         self.assertTrue(res.ok)
         self.assertEqual(len(self.calls()), 1)  # no CLI call for an empty list
 

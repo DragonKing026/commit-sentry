@@ -142,6 +142,14 @@ class DenyRulesTests(unittest.TestCase):
         self.assertEqual(len(rules), len(set(rules)))
         self.assertIn("Read(a/**/*)", cs.deny_rules(["a/**"]))
 
+    def test_deny_rules_keeps_stars_inside_file_names(self):
+        rules = cs.deny_rules(["config/*.local.*"])
+        self.assertIn("Read(config/**/*.local.*)", rules)
+        self.assertIn("Read(**/config/**/*.local.*)", rules)
+        self.assertFalse(any(".local.**" in r for r in rules))
+        self.assertIn("Read(secrets/**/*.*)", cs.deny_rules(["secrets/*.*"]))
+        self.assertIn("Read(**/*/Sensitive-data/**/*)", cs.deny_rules(["*/Sensitive-data/*"]))
+
 
 class RunClaudeTests(ReviewerTestBase):
     def test_run_claude_ok(self):

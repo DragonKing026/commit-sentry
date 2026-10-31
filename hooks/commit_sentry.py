@@ -325,14 +325,15 @@ def deny_rules(patterns: list[str]) -> list[str]:
     """Permission deny rules (`Read(...)`) for fnmatch deny-read patterns, anywhere in the repo.
 
     fnmatch's `*` also crosses `/`, permission globs do not, so a pattern with `/` and `*` also gets
-    a variant with each `*` run replaced by `**/*` (`secrets/*.pem` -> `secrets/**/*.pem`; a `**`
-    that is not a whole path segment does not cross directories).
+    a variant with each `*` run that starts a path segment replaced by `**/*` (`secrets/*.pem` ->
+    `secrets/**/*.pem`, `config/*.local.*` -> `config/**/*.local.*`; a `**` that is not a whole path
+    segment does not cross directories, so stars inside a file name stay as they are).
     """
     rules: list[str] = []
     for pat in patterns:
         variants = [pat]
         if "/" in pat and "*" in pat:
-            variants.append(re.sub(r"\*+", "**/*", pat))
+            variants.append(re.sub(r"(?:(?<=/)|^)\*+", "**/*", pat))
         for p in variants:
             for rule in ([f"Read({p})", f"Read(**/{p})"] if "/" in p else [f"Read(**/{p})"]):
                 if rule not in rules:

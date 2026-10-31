@@ -8,9 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 with atheris.instrument_imports():
     import commit_sentry
 
-# json.loads raises RecursionError on very deeply nested arrays; the hook catches it at the top level
-# and logs the review as failed (fail-open), so it is not treated as a crash here.
-EXPECTED: tuple[type[BaseException], ...] = (RecursionError,)
+# _parse_json_list() must accept any string (deep nesting included) and return a list or None.
+EXPECTED: tuple[type[BaseException], ...] = ()
 
 
 def TestOneInput(data: bytes) -> None:

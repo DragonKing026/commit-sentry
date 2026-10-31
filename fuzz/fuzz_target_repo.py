@@ -15,14 +15,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 with atheris.instrument_imports():
     import commit_sentry
 
-# os.path.expanduser("~name\0...") raises ValueError (embedded null byte) from the pwd lookup; a real Bash
-# command cannot contain NUL, and the hook catches it at the top level, so it is not treated as a crash.
-EXPECTED: tuple[type[BaseException], ...] = (ValueError,)
+# target_repo() must accept any command string (NUL bytes included) and return a path.
+EXPECTED: tuple[type[BaseException], ...] = ()
 
 CWD = tempfile.mkdtemp(prefix="cs-fuzz-")
 
 
 def _no_git(repo: str, *args: str) -> subprocess.CompletedProcess:
+    if "\0" in repo:  # the real subprocess call would raise ValueError
+        raise AssertionError(f"NUL byte in the directory passed to git: {repo!r}")
     return subprocess.CompletedProcess(["git", "-C", repo, *args], 128, "", "fatal: not a git repository\n")
 
 

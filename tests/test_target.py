@@ -72,6 +72,14 @@ class TargetTests(unittest.TestCase):
         msg = "git commit -m \"$(cat <<'EOF'\ncd ../sub\nEOF\n)\""
         self.assertEqual(cs.target_repo(msg, main), main)
 
+    def test_target_repo_nul_byte_falls_back_to_cwd(self):
+        make_repo(os.path.join(self.tmp, "sub"))
+        main = make_repo(os.path.join(self.tmp, "main"))
+        # found by fuzzing: expanduser("~x\0y") raised ValueError; a NUL in a path would break git too
+        self.assertEqual(cs.target_repo("cd ~nouser\0x && git commit -m x", main), main)
+        self.assertEqual(cs.target_repo("cd ../sub\0x && git commit -m x", main), main)
+        self.assertEqual(cs.target_repo("cd ../sub; git -C a\0b commit -m x", main), main)
+
     def test_target_repo_git_global_options(self):
         sub = make_repo(os.path.join(self.tmp, "sub"))
         main = make_repo(os.path.join(self.tmp, "main"))

@@ -236,6 +236,16 @@ class StageTests(ReviewerTestBase):
         self.assertFalse(res.ok)
         self.assertEqual(res.error, "unparseable output")
 
+    def test_deeply_nested_json_is_unparseable(self):
+        # found by fuzzing: json.loads raised RecursionError past the ValueError handler
+        self.assertIsNone(cs._parse_json_list("[" * 100000))
+        self.assertIsNone(cs._parse_json_list("```json\n" + "[" * 100000 + "\n```"))
+        self.reply(ok_reply("```json\n" + "[" * 100000 + "]" * 100000 + "\n```"))
+        cands, res = cs.investigate("d", False, cs.Rules(), self.repo)
+        self.assertEqual(cands, [])
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error, "unparseable output")
+
     def test_prompt_with_braces_and_rules(self):
         self.reply(ok_reply(fenced([])))
         diff = "+x = {'a': 1}  # {project_rules} {candidates} {0}\n"

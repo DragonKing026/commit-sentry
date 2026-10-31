@@ -152,17 +152,34 @@ def _is_git_commit(seg: list[str]) -> bool:
     return idx is not None and seg[idx] == "commit"
 
 
+def _join_dir(cur: str, token: str) -> str | None:
+    """`token` (a cd / git -C argument) resolved against `cur`; None if it is not a usable path (NUL byte)."""
+    if "\0" in token:
+        return None
+    try:
+        return os.path.normpath(os.path.join(cur, os.path.expanduser(token)))
+    except ValueError:
+        return None
+
+
 def target_repo(command: str, cwd: str) -> str:
-    """Repository a `git commit` command acts on (cd / git -C aware), else the session cwd."""
-    cur = cwd
+    """Repository a `git commit` command acts on (cd / git -C aware), else the session cwd.
+
+    An unusable directory argument (for example one with a NUL byte) falls back to the session cwd.
+    """
+    cur: str | None = cwd
     for seg in _segments(command):
         if seg[0] == "cd" and len(seg) > 1:
-            cur = os.path.normpath(os.path.join(cur, os.path.expanduser(seg[1])))
+            cur = _join_dir(cur, seg[1])
         elif _is_git_commit(seg):
             c = _git_C_dir(seg)
             if c:
-                cur = os.path.normpath(os.path.join(cur, os.path.expanduser(c)))
+                cur = _join_dir(cur, c)
             break
+        if cur is None:
+            break
+    if cur is None:
+        cur = cwd
     r = _git(cur, "rev-parse", "--show-toplevel")
     top = r.stdout.strip()
     return top if r.returncode == 0 and top else cur
@@ -509,7 +526,7 @@ def _parse_json_list(text: str) -> list | None:
     raw = blocks[-1].group(1) if blocks else text
     try:
         value = json.loads(raw.strip())
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: very deeply nested arrays from the model
         return None
     if isinstance(value, dict) and isinstance(value.get("findings"), list):
         value = value["findings"]

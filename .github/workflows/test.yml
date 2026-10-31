@@ -29,8 +29,10 @@ jobs:
         run: python3 -m unittest discover -s tests
       - name: Lint
         run: |
-          pip install ruff==0.16.10
-          ruff check hooks tests
+          python3 -m venv "$RUNNER_TEMP/ruff"
+          . "$RUNNER_TEMP/ruff/bin/activate"
+          python -m pip install --require-hashes --no-deps -r .github/requirements/ruff.txt
+          ruff check hooks tests fuzz
       - name: Plugin manifests are valid JSON
         run: |
           for f in .claude-plugin/*.json hooks/hooks.json; do

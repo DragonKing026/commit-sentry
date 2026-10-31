@@ -4,5 +4,21 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # One PR for all actions (codeql-action init/analyze/upload-sarif
+    # must move together).
+    groups:
+      actions:
+        patterns: ["*"]
+    # Only versions at least two weeks old.
     cooldown:
-      default-days: 7
+      default-days: 14
+  # Hash-pinned CI tools (ruff, zizmor) in .github/requirements/*.txt.
+  - package-ecosystem: pip
+    directory: /.github/requirements
+    schedule:
+      interval: weekly
+    groups:
+      ci-tools:
+        patterns: ["*"]
+    cooldown:
+      default-days: 14

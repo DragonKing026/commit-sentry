@@ -71,28 +71,47 @@ _SKIP_TOKENS = {"(", ")", "{", "}", "!"}
 _GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
 
 
-def _newlines_to_semicolons(command: str) -> str:
-    """Replace unquoted newlines with ';' (newlines inside quotes are kept)."""
+_WORD_BREAKS = " \t\n;&|()<>"  # bash metacharacters: a `#` right after one of these starts a comment
+
+
+def _strip_comments_and_newlines(command: str) -> str:
+    """Drop unquoted shell comments and replace unquoted newlines with ';'.
+
+    As in bash, `#` starts a comment only at the beginning of a word (not inside a word, quotes
+    or after a backslash) and the comment runs to the end of the line; the newline itself is kept
+    as a separator. Newlines inside quotes are kept.
+    """
     out: list[str] = []
     quote = ""
+    word_start = True
     i = 0
-    while i < len(command):
+    n = len(command)
+    while i < n:
         ch = command[i]
         if quote:
-            if ch == "\\" and quote == '"' and i + 1 < len(command):
+            if ch == "\\" and quote == '"' and i + 1 < n:
                 out.append(ch)
                 i += 1
                 ch = command[i]
             elif ch == quote:
                 quote = ""
+        elif ch == "#" and word_start:
+            end = command.find("\n", i)
+            i = n if end == -1 else end
+            continue
         elif ch in "'\"":
             quote = ch
-        elif ch == "\\" and i + 1 < len(command):
+        elif ch == "\\" and i + 1 < n:
             out.append(ch)
             i += 1
             ch = command[i]
+            word_start = False
+            out.append(ch)
+            i += 1
+            continue
         elif ch == "\n":
             ch = " ; "
+        word_start = ch == " ; " or (not quote and ch in _WORD_BREAKS)
         out.append(ch)
         i += 1
     return "".join(out)
@@ -101,10 +120,12 @@ def _newlines_to_semicolons(command: str) -> str:
 def _segments(command: str) -> list[list[str]]:
     """Split a shell command into simple commands at &&, ||, ;, |, & and unquoted newlines.
 
-    Leading `(`, `{`, `}`, `!` and `NAME=value` tokens are dropped from each segment.
+    Shell comments are ignored. Leading `(`, `{`, `}`, `!` and `NAME=value` tokens are dropped
+    from each segment.
     """
-    lex = shlex.shlex(_newlines_to_semicolons(command), posix=True, punctuation_chars=True)
+    lex = shlex.shlex(_strip_comments_and_newlines(command), posix=True, punctuation_chars=True)
     lex.whitespace_split = True
+    lex.commenters = ""  # comments are already stripped; a `#` left here is part of a word
     try:
         tokens = list(lex)
     except ValueError:

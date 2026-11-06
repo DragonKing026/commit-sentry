@@ -72,6 +72,26 @@ class TargetTests(unittest.TestCase):
         msg = "git commit -m \"$(cat <<'EOF'\ncd ../sub\nEOF\n)\""
         self.assertEqual(cs.target_repo(msg, main), main)
 
+    def test_target_repo_shell_comments(self):
+        # issue #7: a `#` comment swallowed the rest of the command after newlines were joined
+        sub = make_repo(os.path.join(self.tmp, "sub"))
+        main = make_repo(os.path.join(self.tmp, "main"))
+        self.assertEqual(cs.target_repo("# commit in the sibling repo\ncd ../sub && git commit -m x", main), sub)
+        self.assertEqual(cs.target_repo("# commit in the sibling repo\ngit -C ../sub commit -m x", main), sub)
+        self.assertEqual(cs.target_repo("cd ../sub  # go there\ngit commit -m x", main), sub)
+        self.assertEqual(cs.target_repo("cd ../sub;# go there\ngit commit -m x", main), sub)
+        # an unbalanced quote inside a comment must not make the tokenizer fail
+        self.assertEqual(cs.target_repo("# don't commit here\ncd ../sub && git commit -m x", main), sub)
+        self.assertEqual(cs.target_repo('# say "hi\ngit -C ../sub commit -m x', main), sub)
+        # a comment never changes the directory
+        self.assertEqual(cs.target_repo("# cd ../sub\ngit commit -m x", main), main)
+        self.assertEqual(cs.target_repo("git commit -m x # cd ../sub", main), main)
+        # `#` inside a word or quotes is not a comment (as in bash)
+        self.assertEqual(cs.target_repo("echo a#b; git -C ../sub commit -m x", main), sub)
+        self.assertEqual(cs.target_repo('git -C ../sub commit -m "fix #7"', main), sub)
+        self.assertEqual(cs.target_repo("git -C ../sub commit -m 'fix #7'", main), sub)
+        self.assertEqual(cs.target_repo("cd ../sub && git commit -m fix\\ \\#7", main), sub)
+
     def test_target_repo_nul_byte_falls_back_to_cwd(self):
         make_repo(os.path.join(self.tmp, "sub"))
         main = make_repo(os.path.join(self.tmp, "main"))

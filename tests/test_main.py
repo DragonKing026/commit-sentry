@@ -1,10 +1,10 @@
 import io
 import json
 import os
-import subprocess
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_reviewer import CAND, ReviewerTestBase, cs, fenced, git, ok_reply
 
@@ -205,8 +205,8 @@ class HookTests(MainTestBase):
 
     def test_hook_quiet_old_head_logged_no_sha(self):
         payload = self.quiet_input()
-        env = dict(os.environ, GIT_COMMITTER_DATE="@" + str(int(time.time()) - 3600))
-        subprocess.run(["git", "-C", self.repo, "commit", "-q", "--amend", "--no-edit"], env=env, check=True)
+        with mock.patch.dict(os.environ, GIT_COMMITTER_DATE="@" + str(int(time.time()) - 3600)):
+            git(self.repo, "commit", "-q", "--amend", "--no-edit")
         self.assertEqual(self.run_hook(payload), (0, ""))
         rec = self.log()[-1]
         self.assertEqual((rec["outcome"], rec["reason"], rec["sha"]), ("skipped", "no-sha", None))

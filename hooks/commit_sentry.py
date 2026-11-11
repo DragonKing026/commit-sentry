@@ -183,26 +183,29 @@ def _is_quiet_commit(seg: list[str]) -> bool:
     idx = _git_subcommand_index(seg)
     if idx is None or seg[idx] != "commit":
         return False
+    quiet = False
     i = idx + 1
     while i < len(seg):
         t = seg[i]
         if t == "--":
             break
+        if t == "--dry-run":
+            return False  # makes no commit
         if t == "--quiet":
-            return True
-        if t.startswith("--"):
+            quiet = True
+        elif t.startswith("--"):
             if t in _COMMIT_VALUE_LONG:
                 i += 1  # skip the separate value
         elif t.startswith("-") and len(t) > 1:
             for j, ch in enumerate(t[1:]):
                 if ch == "q":
-                    return True
-                if ch in _COMMIT_VALUE_SHORT:
+                    quiet = True
+                elif ch in _COMMIT_VALUE_SHORT:
                     if j == len(t) - 2:
                         i += 1  # value is the next token
                     break
         i += 1
-    return False
+    return quiet
 
 
 def quiet_commit(command: str) -> bool:
@@ -255,16 +258,20 @@ def resolve_commit(repo: str, short: str) -> Commit | None:
 
 
 FRESH_SECONDS = 300  # a quiet commit's HEAD must be at most this old to count as the commit just made
-_FAILED_COMMIT = re.compile(r"nothing to commit|no changes added to commit|nothing added to commit")
 
 
-def fresh_head(repo: str, now: float, window: int = FRESH_SECONDS) -> str | None:
-    """Full sha of HEAD if its committer time is within `window` seconds of `now`, else None."""
-    r = _git(repo, "log", "-1", "--format=%H %ct", "HEAD")
-    parts = r.stdout.split()
-    if r.returncode != 0 or len(parts) != 2 or not parts[1].isdigit():
-        return None
-    return parts[0] if -60 <= now - int(parts[1]) <= window else None
+def fresh_commits(repo: str, now: float, window: int = FRESH_SECONDS, limit: int = 10) -> list[str]:
+    """Full shas of HEAD and its first-parent ancestors committed within `window` seconds of `now`, newest first."""
+    r = _git(repo, "log", f"-{limit}", "--first-parent", "--format=%H %ct", "HEAD")
+    out: list[str] = []
+    if r.returncode != 0:
+        return out
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[1].isdigit() or not -60 <= now - int(parts[1]) <= window:
+            break
+        out.append(parts[0])
+    return out
 
 
 def _split_list(value: str) -> list[str]:
@@ -369,7 +376,7 @@ def first_failure(session_id: str) -> bool:
     return True
 
 
-SEEN_TTL = 7 * 24 * 3600
+SEEN_TTL = 24 * 3600  # markers only need to outlive FRESH_SECONDS; a day leaves room for clock skew
 
 
 def mark_seen(sha: str) -> bool:
@@ -377,7 +384,7 @@ def mark_seen(sha: str) -> bool:
     d = state_dir() / "seen"
     d.mkdir(mode=0o700, exist_ok=True)
     now = time.time()
-    for old in d.iterdir():  # prune: the markers only need to outlive FRESH_SECONDS
+    for old in d.iterdir():  # prune markers older than SEEN_TTL
         try:
             if now - old.stat().st_mtime > SEEN_TTL:
                 old.unlink()
@@ -829,13 +836,6 @@ def _mark_seen(sha: str) -> bool:
         return True  # broken state degrades to "no state": review rather than skip
 
 
-def _tool_text(data: dict) -> str:
-    resp = data.get("tool_response")
-    if isinstance(resp, dict):
-        return "\n".join(v for v in (resp.get("stdout"), resp.get("stderr")) if isinstance(v, str))
-    return resp if isinstance(resp, str) else ""
-
-
 def _commit_sha(data: dict) -> str | None:
     resp = data.get("tool_response")
     if isinstance(resp, dict):
@@ -871,21 +871,26 @@ def _hook(stdin, stderr) -> int:
         if _git(repo, "config", "--type=bool", "--get", "commit-sentry.enabled").stdout.strip() == "false":
             return 0
         sid = ctx["session_id"]
+        fresh: list[str] = []
         if quiet:
             # `git commit -q` prints no `[branch sha]` line, so Claude Code reports no commit either:
             # take HEAD if it was just made and this hook has not handled it yet.
-            if _FAILED_COMMIT.search(_tool_text(data)):
-                return 0
-            short = ctx["short"] = fresh_head(repo, time.time())
-            if not short:
+            fresh = fresh_commits(repo, time.time())
+            if not fresh:
                 _safe_log(sid, repo, None, "skipped", "no-sha")
                 return 0
+            short = ctx["short"] = fresh[0]
         commit = ctx["commit"] = resolve_commit(repo, short)
         if commit is None:
             _safe_log(sid, repo, None, "skipped", f"commit-not-found:{short[:7]}", sha=short)
             return 0
         if not _mark_seen(commit.sha) and quiet:
             return 0  # an earlier hook run already handled this HEAD (e.g. a later failed quiet commit)
+        for other in fresh[1:]:
+            # several quiet commits in one command (or parallel commands): only HEAD is reviewed,
+            # the others are logged so they can be reviewed by hand with --review
+            if _mark_seen(other):
+                _safe_log(sid, repo, None, "skipped", "multiple-commits", sha=other)
         rules = load_rules(repo)
         reason = skip_reason(commit, rules)
         if reason:

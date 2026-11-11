@@ -183,7 +183,7 @@ class TargetTests(unittest.TestCase):
             self.assertTrue(cs.quiet_commit(cmd), cmd)
         for cmd in ["git commit -m x", "git commit -m -q", "git commit -mq", "git commit --message -q",
                     "git commit -m x -- -q", "git log -q --grep commit", "echo git commit -q",
-                    "git commit -F msg.txt"]:
+                    "git commit -F msg.txt", "git commit -q --dry-run", "git commit --dry-run -qm x"]:
             self.assertFalse(cs.quiet_commit(cmd), cmd)
 
 if __name__ == "__main__":

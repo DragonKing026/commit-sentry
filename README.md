@@ -27,7 +27,10 @@ keeps working while the review runs.
   (file tools allowed only inside the repository) twice: find, then verify.
 - A quiet commit (`git commit -q`, `--quiet`, `-qm`) prints no `[branch sha]` line, so the script takes `HEAD` of
   that repository instead, but only if it was committed in the last 5 minutes and the hook has not handled it
-  before (markers in `seen/` in the state directory, kept 7 days).
+  before (every handled commit leaves a marker in `seen/` in the state directory, kept one day). If one command
+  makes several quiet commits, only the last one is reviewed; the others are logged as `skipped` with `reason`
+  `multiple-commits` (review them with `--review`). A fresh commit made elsewhere in the same repository (in a
+  terminal or another session) within those 5 minutes can be reviewed in place of a quiet commit that failed.
 - Failed commits, merge commits and runs started by the reviewer itself are skipped.
 - Any internal error is logged and never breaks your session.
 

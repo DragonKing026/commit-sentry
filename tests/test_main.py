@@ -182,11 +182,26 @@ class HookTests(MainTestBase):
         self.assertEqual(self.run_hook(again), (0, ""))
         self.assertEqual([r["outcome"] for r in self.log()], ["clean"])
 
-    def test_hook_quiet_nothing_to_commit(self):
-        payload = self.quiet_input(stdout="On branch main\nnothing to commit, working tree clean\n")
+    def test_hook_quiet_commit_then_status(self):
+        # `git status` after a successful quiet commit prints "nothing to commit": still reviewed
+        self.reply(ok_reply(fenced([])))
+        payload = self.quiet_input(command="git commit -q -m c && git status",
+                                   stdout="On branch main\nnothing to commit, working tree clean\n")
         self.assertEqual(self.run_hook(payload), (0, ""))
-        self.assertEqual(self.log(), [])
-        self.assertFalse(self.record.exists())
+        self.assertEqual(self.log()[-1]["outcome"], "clean")
+
+    def test_hook_quiet_multiple_commits(self):
+        self.reply(ok_reply(fenced([])))
+        self.commit({"b.py": "y = 2\n"})
+        first = git(self.repo, "rev-parse", "HEAD")
+        payload = self.quiet_input(command="git commit -qm a && git commit -qm b")
+        self.assertEqual(self.run_hook(payload), (0, ""))
+        recs = self.log()
+        reviewed = [r for r in recs if r["outcome"] != "skipped"]
+        self.assertEqual([(r["sha"], r["outcome"]) for r in reviewed], [(git(self.repo, "rev-parse", "HEAD"), "clean")])
+        skipped = {r["sha"] for r in recs if r["reason"] == "multiple-commits"}
+        self.assertIn(first, skipped)
+        self.assertEqual(len(self.calls()), 1)
 
     def test_hook_quiet_old_head_logged_no_sha(self):
         payload = self.quiet_input()

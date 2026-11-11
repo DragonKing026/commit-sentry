@@ -52,10 +52,10 @@ archive `commit-sentry-<version>.tar.gz`, `SHA256SUMS` and SLSA level 3 provenan
 [slsa-verifier](https://github.com/slsa-framework/slsa-verifier):
 
 ```sh
-slsa-verifier verify-artifact commit-sentry-0.1.0.tar.gz \
-  --provenance-path commit-sentry-0.1.0.tar.gz.intoto.jsonl \
+slsa-verifier verify-artifact commit-sentry-0.1.1.tar.gz \
+  --provenance-path commit-sentry-0.1.1.tar.gz.intoto.jsonl \
   --source-uri github.com/DragonKing026/commit-sentry \
-  --source-tag v0.1.0
+  --source-tag v0.1.1
 sha256sum -c SHA256SUMS
 ```
 

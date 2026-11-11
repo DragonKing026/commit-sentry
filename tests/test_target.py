@@ -176,5 +176,15 @@ class TargetTests(unittest.TestCase):
         self.assertFalse(cs.matches("src/a.py", ["*.md"]))
 
 
+    def test_quiet_commit(self):
+        for cmd in ["git commit -q -m x", "git commit --quiet -m x", "git commit -qm x", "git commit -aqm x",
+                    "git -C repo commit -q -m x", "git add a && git commit -q -m x && git push",
+                    "NARZEDZIA_BEZ_PUSH=1 git commit -qm 'a b'", "git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\" -q"]:
+            self.assertTrue(cs.quiet_commit(cmd), cmd)
+        for cmd in ["git commit -m x", "git commit -m -q", "git commit -mq", "git commit --message -q",
+                    "git commit -m x -- -q", "git log -q --grep commit", "echo git commit -q",
+                    "git commit -F msg.txt"]:
+            self.assertFalse(cs.quiet_commit(cmd), cmd)
+
 if __name__ == "__main__":
     unittest.main()

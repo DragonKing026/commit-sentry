@@ -25,6 +25,9 @@ keeps working while the review runs.
   `git -C` and worktrees), builds a size-limited diff and runs
   `claude -p --safe-mode --restricted --model opus --tools Read,Grep,Glob --output-format json --no-session-persistence`
   (file tools allowed only inside the repository) twice: find, then verify.
+- A quiet commit (`git commit -q`, `--quiet`, `-qm`) prints no `[branch sha]` line, so the script takes `HEAD` of
+  that repository instead, but only if it was committed in the last 5 minutes and the hook has not handled it
+  before (markers in `seen/` in the state directory, kept 7 days).
 - Failed commits, merge commits and runs started by the reviewer itself are skipped.
 - Any internal error is logged and never breaks your session.
 
@@ -125,7 +128,8 @@ Every review, skip and failure is appended as one JSON line to `reviews.jsonl` i
 findings, including LOW), `confirmed`, `refuted` (candidates rejected in stage 2, each with the reviewer's
 `reason`), `downgraded` (candidates confirmed in stage 2 but rated LOW, each with the reviewer's `reason`;
 log only, they do not wake the session), `error`. A commit that cannot be found in the resolved repository
-(for example after `cd "$VAR"`) is logged as `skipped` with `reason` `commit-not-found:<sha7>`. The log contains
+(for example after `cd "$VAR"`) is logged as `skipped` with `reason` `commit-not-found:<sha7>`; a quiet commit whose `HEAD` is not fresh is
+logged as `skipped` with `reason` `no-sha`. The log contains
 finding descriptions, so treat it as sensitive.
 
 A manual `--review` run from a terminal has no `CLAUDE_PLUGIN_DATA`, so it writes to

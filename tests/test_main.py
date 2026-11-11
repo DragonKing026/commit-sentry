@@ -1,6 +1,8 @@
 import io
 import json
 import os
+import subprocess
+import time
 import unittest
 from pathlib import Path
 
@@ -156,6 +158,49 @@ class HookTests(MainTestBase):
         self.assertEqual((rec["outcome"], rec["reason"], rec["sha"]), ("skipped", "commit-not-found:deadbee", "deadbee"))
         self.assertEqual(rec["repo"], str(Path(self.repo).resolve()))
         self.assertFalse(self.record.exists())
+
+    def quiet_input(self, command="git commit -q -m c", stdout="", session="s1"):
+        self.n = getattr(self, "n", 0) + 1
+        self.commit({"a.py": f"import os\nos.system(input())  # q{self.n}\n"})
+        return json.dumps({"session_id": session, "cwd": self.repo, "tool_input": {"command": command},
+                           "tool_response": {"stdout": stdout, "stderr": ""}})
+
+    def test_hook_quiet_commit_reviewed(self):
+        self.reply(ok_reply(fenced([CAND])), ok_reply(fenced(CONFIRM)))
+        code, err = self.run_hook(self.quiet_input())
+        self.assertEqual(code, 2)
+        self.assertIn("user input reaches os.system", err)
+        rec = self.log()[-1]
+        self.assertEqual((rec["outcome"], rec["sha"]), ("findings", git(self.repo, "rev-parse", "HEAD")))
+
+    def test_hook_quiet_commit_handled_once(self):
+        self.reply(ok_reply(fenced([])))
+        payload = self.quiet_input()
+        self.assertEqual(self.run_hook(payload)[0], 0)
+        # a second quiet command (e.g. a commit refused by a pre-commit hook) sees the same fresh HEAD
+        again = json.dumps(dict(json.loads(payload), tool_response={"stdout": "", "stderr": "hook failed"}))
+        self.assertEqual(self.run_hook(again), (0, ""))
+        self.assertEqual([r["outcome"] for r in self.log()], ["clean"])
+
+    def test_hook_quiet_nothing_to_commit(self):
+        payload = self.quiet_input(stdout="On branch main\nnothing to commit, working tree clean\n")
+        self.assertEqual(self.run_hook(payload), (0, ""))
+        self.assertEqual(self.log(), [])
+        self.assertFalse(self.record.exists())
+
+    def test_hook_quiet_old_head_logged_no_sha(self):
+        payload = self.quiet_input()
+        env = dict(os.environ, GIT_COMMITTER_DATE="@" + str(int(time.time()) - 3600))
+        subprocess.run(["git", "-C", self.repo, "commit", "-q", "--amend", "--no-edit"], env=env, check=True)
+        self.assertEqual(self.run_hook(payload), (0, ""))
+        rec = self.log()[-1]
+        self.assertEqual((rec["outcome"], rec["reason"], rec["sha"]), ("skipped", "no-sha", None))
+        self.assertFalse(self.record.exists())
+
+    def test_hook_non_commit_command_silent(self):
+        payload = self.quiet_input(command="git log -q --grep commit")
+        self.assertEqual(self.run_hook(payload), (0, ""))
+        self.assertEqual(self.log(), [])
 
     def test_hook_invalid_json(self):
         code, err = self.run_hook("not json")

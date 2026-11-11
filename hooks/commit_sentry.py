@@ -173,6 +173,43 @@ def _is_git_commit(seg: list[str]) -> bool:
     return idx is not None and seg[idx] == "commit"
 
 
+_COMMIT_VALUE_SHORT = set("mFcCt")  # short `git commit` options that take a value
+_COMMIT_VALUE_LONG = {"--message", "--file", "--reuse-message", "--reedit-message", "--template", "--author",
+                      "--date", "--fixup", "--squash", "--trailer", "--cleanup", "--pathspec-from-file"}
+
+
+def _is_quiet_commit(seg: list[str]) -> bool:
+    """True for `git ... commit` with -q / --quiet (also bundled, e.g. -qm, -aqm)."""
+    idx = _git_subcommand_index(seg)
+    if idx is None or seg[idx] != "commit":
+        return False
+    i = idx + 1
+    while i < len(seg):
+        t = seg[i]
+        if t == "--":
+            break
+        if t == "--quiet":
+            return True
+        if t.startswith("--"):
+            if t in _COMMIT_VALUE_LONG:
+                i += 1  # skip the separate value
+        elif t.startswith("-") and len(t) > 1:
+            for j, ch in enumerate(t[1:]):
+                if ch == "q":
+                    return True
+                if ch in _COMMIT_VALUE_SHORT:
+                    if j == len(t) - 2:
+                        i += 1  # value is the next token
+                    break
+        i += 1
+    return False
+
+
+def quiet_commit(command: str) -> bool:
+    """Whether the command runs a quiet `git commit` (no `[branch sha]` line in its output)."""
+    return any(_is_quiet_commit(seg) for seg in _segments(command))
+
+
 def _join_dir(cur: str, token: str) -> str | None:
     """`token` (a cd / git -C argument) resolved against `cur`; None if it is not a usable path (NUL byte)."""
     if "\0" in token:
@@ -215,6 +252,19 @@ def resolve_commit(repo: str, short: str) -> Commit | None:
     parents = _git(repo, "rev-list", "--parents", "-n", "1", sha).stdout.split()[1:]
     out = _git(repo, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", sha).stdout
     return Commit(sha=sha, parents=parents, files=[f for f in out.split("\0") if f])
+
+
+FRESH_SECONDS = 300  # a quiet commit's HEAD must be at most this old to count as the commit just made
+_FAILED_COMMIT = re.compile(r"nothing to commit|no changes added to commit|nothing added to commit")
+
+
+def fresh_head(repo: str, now: float, window: int = FRESH_SECONDS) -> str | None:
+    """Full sha of HEAD if its committer time is within `window` seconds of `now`, else None."""
+    r = _git(repo, "log", "-1", "--format=%H %ct", "HEAD")
+    parts = r.stdout.split()
+    if r.returncode != 0 or len(parts) != 2 or not parts[1].isdigit():
+        return None
+    return parts[0] if -60 <= now - int(parts[1]) <= window else None
 
 
 def _split_list(value: str) -> list[str]:
@@ -313,6 +363,28 @@ def first_failure(session_id: str) -> bool:
     marker = state_dir() / name  # outside the try: a broken state dir must not look like "already failed"
     try:
         fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
+
+
+SEEN_TTL = 7 * 24 * 3600
+
+
+def mark_seen(sha: str) -> bool:
+    """Record that the hook handled `sha`; False if it was already recorded (race-safe marker file)."""
+    d = state_dir() / "seen"
+    d.mkdir(mode=0o700, exist_ok=True)
+    now = time.time()
+    for old in d.iterdir():  # prune: the markers only need to outlive FRESH_SECONDS
+        try:
+            if now - old.stat().st_mtime > SEEN_TTL:
+                old.unlink()
+        except OSError:
+            pass
+    try:
+        fd = os.open(d / sha, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         return False
     os.close(fd)
@@ -750,6 +822,20 @@ def _rate_slot() -> bool:
         return True  # broken state degrades to "no state": the slot is available
 
 
+def _mark_seen(sha: str) -> bool:
+    try:
+        return mark_seen(sha)
+    except Exception:
+        return True  # broken state degrades to "no state": review rather than skip
+
+
+def _tool_text(data: dict) -> str:
+    resp = data.get("tool_response")
+    if isinstance(resp, dict):
+        return "\n".join(v for v in (resp.get("stdout"), resp.get("stderr")) if isinstance(v, str))
+    return resp if isinstance(resp, str) else ""
+
+
 def _commit_sha(data: dict) -> str | None:
     resp = data.get("tool_response")
     if isinstance(resp, dict):
@@ -776,18 +862,30 @@ def _hook(stdin, stderr) -> int:
             raise ValueError("invalid hook input: not an object")  # noqa: TRY004 (logged as ValueError, same as bad JSON above)
         ctx["session_id"] = str(data.get("session_id") or "unknown")
         short = ctx["short"] = _commit_sha(data)
-        if not short:
-            return 0
         tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-        repo = ctx["repo"] = target_repo(str(tool_input.get("command") or ""),
-                                         str(data.get("cwd") or os.getcwd()))
+        command = str(tool_input.get("command") or "")
+        quiet = not short and quiet_commit(command)
+        if not short and not quiet:
+            return 0
+        repo = ctx["repo"] = target_repo(command, str(data.get("cwd") or os.getcwd()))
         if _git(repo, "config", "--type=bool", "--get", "commit-sentry.enabled").stdout.strip() == "false":
             return 0
+        sid = ctx["session_id"]
+        if quiet:
+            # `git commit -q` prints no `[branch sha]` line, so Claude Code reports no commit either:
+            # take HEAD if it was just made and this hook has not handled it yet.
+            if _FAILED_COMMIT.search(_tool_text(data)):
+                return 0
+            short = ctx["short"] = fresh_head(repo, time.time())
+            if not short:
+                _safe_log(sid, repo, None, "skipped", "no-sha")
+                return 0
         commit = ctx["commit"] = resolve_commit(repo, short)
         if commit is None:
-            _safe_log(ctx["session_id"], repo, None, "skipped", f"commit-not-found:{short[:7]}", sha=short)
+            _safe_log(sid, repo, None, "skipped", f"commit-not-found:{short[:7]}", sha=short)
             return 0
-        sid = ctx["session_id"]
+        if not _mark_seen(commit.sha) and quiet:
+            return 0  # an earlier hook run already handled this HEAD (e.g. a later failed quiet commit)
         rules = load_rules(repo)
         reason = skip_reason(commit, rules)
         if reason:

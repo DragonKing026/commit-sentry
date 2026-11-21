@@ -1,6 +1,6 @@
 # Hash-pinned for CI (pip install --require-hashes --no-deps); hashes cover every distribution on PyPI.
-# Regenerate: echo 'ruff==0.17.3' | uv pip compile - --generate-hashes --no-header --no-annotate
-ruff==0.17.3 \
+# Regenerate: echo 'ruff==0.17.4' | uv pip compile - --generate-hashes --no-header --no-annotate
+ruff==0.17.4 \
     --hash=sha256:029c37cbd3de48ca37aa12117bead2d065f15da17d66bf84e0d4274013705db2 \
     --hash=sha256:27bb571ac78fef178fe5118d2827df95c2aae74a48fff2b15f6acd03af5ff5bb \
     --hash=sha256:39405f341deec934b4289634324ad695f72df2970f9121582872eaf5b722f0f5 \

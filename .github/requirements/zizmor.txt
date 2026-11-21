@@ -1,6 +1,6 @@
 # Hash-pinned for CI (pip install --require-hashes --no-deps); hashes cover every distribution on PyPI.
-# Regenerate: echo 'zizmor==1.31.1' | uv pip compile - --generate-hashes --no-header --no-annotate
-zizmor==1.31.1 \
+# Regenerate: echo 'zizmor==1.32.0' | uv pip compile - --generate-hashes --no-header --no-annotate
+zizmor==1.32.0 \
     --hash=sha256:385732e55ca152a013b0863213b67be32f94157775354b8ad23cc9c5d70cdc82 \
     --hash=sha256:3b35b393e8d437e275c7e399047c9892ccc290f3fc5e6aeb9f65a5d3b2a470e0 \
     --hash=sha256:4a70ee3c2721122aff04d5bbad5e448d15384f45de2ecb3c9493fe9dac2bc95f \
